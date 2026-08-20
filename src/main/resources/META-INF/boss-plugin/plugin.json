@@ -1,0 +1,36 @@
+{
+  "manifestVersion": 1,
+  "pluginId": "ai.rever.boss.plugin.dynamic.deepseekharness",
+  "displayName": "DeepSeek Harness",
+  "version": "1.0.0",
+  "apiVersion": "1.0.80",
+  "minApiVersion": "1.0.80",
+  "minBossVersion": "9.4.2",
+  "mainClass": "ai.rever.boss.plugin.dynamic.deepseekharness.DshDynamicPlugin",
+  "type": "mixed",
+  "description": "Run DeepSeek Harness (dsh) inside BOSS. Installs and supervises the harness, embeds its Web UI in a tab, feeds it the API key BOSS already manages, and exposes dsh_* tools so in-terminal agents can drive it.",
+  "author": "Risa Labs",
+  "url": "https://github.com/risa-labs-inc/boss-plugin-deepseek-harness",
+  "panel": {
+    "icon": "AutoAwesome",
+    "location": "left.bottom",
+    "order": 58,
+    "panelId": "deepseek-harness-panel",
+    "displayName": "DeepSeek Harness"
+  },
+  "definedPermissions": [
+    {
+      "name": "dsh.run",
+      "description": "Let agents submit tasks to DeepSeek Harness. Each task spends model tokens and can read and write files in the workspace it runs against."
+    },
+    {
+      "name": "dsh.manage",
+      "description": "Let agents change DeepSeek Harness state: start and stop its server, and add or remove profile bundles"
+    }
+  ],
+  "sandbox": {
+    "maxThreads": 8,
+    "maxRestartAttempts": 3,
+    "heartbeatIntervalMs": 5000
+  }
+}
