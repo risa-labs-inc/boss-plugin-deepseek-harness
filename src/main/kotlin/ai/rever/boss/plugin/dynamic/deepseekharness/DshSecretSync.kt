@@ -116,15 +116,15 @@ class DshSecretSync(
     /**
      * The variable NAMES that would be injected, without reading any value.
      *
-     * Registration only needs names, and fetching secret values to compute a name
-     * set would pull credentials into memory for no reason.
+     * Derived from [envFor] rather than from [candidates] so the two can never
+     * disagree. They did: `namesFor` skipped the blank-password filter, so a
+     * secret with an empty value had its route written into the harness settings
+     * while the variable was never injected - which is exactly the
+     * `MISSING_CREDENTIAL` failure `DshProviderRegistrar.plan` exists to avoid.
+     * The values fetched here are discarded immediately.
      */
     suspend fun namesFor(selection: DshKeySelection, alreadySupplied: Set<String>): Set<String> =
-        candidates()
-            .filter { selection.isOn(it) }
-            .map { it.envName }
-            .filter { it !in alreadySupplied }
-            .toSet()
+        envFor(selection, alreadySupplied).keys
 
     /**
      * Environment entries to hand a harness child, for the effective selection.
@@ -212,7 +212,10 @@ class DshSecretSync(
             .sortedWith(
                 compareByDescending<DshKeyCandidate> { it.referencedByHarness }
                     .thenByDescending { it.recognisedProvider }
-                    .thenBy { it.label },
+                    .thenBy { it.label }
+                    // Last resort so ties do not fall back to whatever order the
+                    // store returned; envFor's distinctBy depends on this.
+                    .thenBy { it.secretId },
             )
     }
 
@@ -247,8 +250,10 @@ class DshSecretSync(
         )
 
         /** True when [envName] names a model-provider credential. */
-        fun isProviderKey(envName: String): Boolean =
-            normalise(envName) in PROVIDER_KEYS.map(::normalise).toSet()
+        fun isProviderKey(envName: String): Boolean = normalise(envName) in NORMALISED_PROVIDER_KEYS
+
+        /** Built once: `annotate` asks per secret, and a big store asks often. */
+        private val NORMALISED_PROVIDER_KEYS: Set<String> = PROVIDER_KEYS.map(::normalise).toSet()
 
         private fun normalise(name: String) = name.replace("_", "").uppercase()
 

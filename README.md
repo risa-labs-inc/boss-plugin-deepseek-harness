@@ -13,9 +13,11 @@ the harness's own web UI, and `dsh_*` MCP tools so in-terminal agents can drive 
   session list, model picker - served by the process the panel supervises.
 - **MCP tools** so an agent can ask the harness to do work, manage its profiles
   and bundles, and find out why it is not working.
-- **Credentials from BOSS.** A DeepSeek key configured on BOSS's AI Providers
-  settings page is passed to each harness run through the environment. Nothing is
-  written to disk.
+- **Provider keys from BOSS.** Secrets in BOSS that are model-provider keys are
+  passed to each harness run through the environment, and their provider routes
+  are registered in the harness for you. Recognised provider keys are on by
+  default; anything else stays off and one switch away, because a secret store
+  also holds signing keys and CI tokens. No secret is ever written to disk.
 
 ## Requirements
 
@@ -25,8 +27,10 @@ the harness's own web UI, and `dsh_*` MCP tools so in-terminal agents can drive 
 - **pnpm only for bundle management.** `dsh plugin` forwards to pnpm, so the
   panel's Bundles section and the `dsh_bundle_*` tools need it. Everything else
   works without it.
-- A DeepSeek API key to run a turn. Without one the harness starts and serves its
-  UI, but any turn fails.
+- An API key for some supported provider to run a turn. It does not have to be
+  DeepSeek: any provider the harness's catalog serves works, including one you
+  configure entirely through its own Models page. Without any key the harness
+  still starts and serves its UI, but every turn fails.
 
 ## Tools
 
@@ -40,6 +44,10 @@ the harness's own web UI, and `dsh_*` MCP tools so in-terminal agents can drive 
 | `dsh_profiles`, `dsh_dump_config` | no | - |
 | `dsh_bundle_add` / `dsh_bundle_remove` | yes | `dsh.manage` |
 | `dsh_sessions` | no | - |
+
+Registering a provider route edits `$DSH_HOME/settings.yaml`, additively and
+with a backup, and refuses outright if the existing block holds options it cannot
+re-emit. It never changes your selected model.
 
 `dsh_ask` is gated because a harness turn spends model tokens and, under the
 harness's default `workspace-write` preset, can write files anywhere in the

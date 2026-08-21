@@ -100,8 +100,15 @@ class DshCredentials(private val context: PluginContext) {
      * `DEEPSEEK_API_KEY`; the provider is the more specific statement of intent,
      * so it wins and the sync skips that name rather than the two racing on map
      * insertion order.
+     *
+     * **Conditional on a value actually resolving.** Claiming the name
+     * unconditionally meant that with no provider configured, `childEnv()` mapped
+     * the name to null (a removal) while the sync skipped it as "already
+     * supplied" - so a DEEPSEEK_API_KEY secret the user had ticked was never
+     * injected, the inherited one was unset, and the `deepseek` route could never
+     * be registered.
      */
-    fun suppliedNames(): Set<String> = setOf(ENV_KEY)
+    suspend fun suppliedNames(): Set<String> = if (resolve() != null) setOf(ENV_KEY) else emptySet()
 
     private fun fromProvider(): String? {
         val provider = context.llmProvider ?: return null

@@ -263,6 +263,33 @@ class DshSecretSyncTest {
         assertEquals(emptyMap(), s.envFor(DshKeySelection(enabled = setOf("1")), emptySet()))
     }
 
+    @Test
+    fun `namesFor applies the same blank-value filter as envFor`() = runTest {
+        // They disagreed: namesFor skipped the blank check, so plan() proposed a
+        // route for a credential that would never be injected - the exact
+        // MISSING_CREDENTIAL failure the registrar exists to avoid.
+        val s = sync(
+            entry("1", "OPENAI", "OPENAI_API_KEY", "   "),
+            entry("2", "XAI", "XAI_API_KEY", "sk-xai"),
+        )
+
+        assertEquals(setOf("XAI_API_KEY"), s.namesFor(DshKeySelection(), emptySet()))
+    }
+
+    @Test
+    fun `namesFor and envFor always agree`() = runTest {
+        val s = sync(
+            entry("1", "OPENAI", "OPENAI_API_KEY", "sk"),
+            entry("2", "XAI", "XAI_API_KEY", ""),
+            entry("3", "risa-labs-inc/BossConsole", "GPG_SIGNING_KEY", "gpg"),
+        )
+
+        assertEquals(
+            s.envFor(DshKeySelection(), emptySet()).keys,
+            s.namesFor(DshKeySelection(), emptySet()),
+        )
+    }
+
     // --------------------------------------------- reading the harness config
 
     @Test

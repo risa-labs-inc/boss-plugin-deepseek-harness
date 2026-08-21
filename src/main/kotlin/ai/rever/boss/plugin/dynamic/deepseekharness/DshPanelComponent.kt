@@ -387,9 +387,9 @@ private fun KeysBody(
             "Recognised provider keys are on by default; anything else is off " +
                 "until you turn it on, because a secret store also holds signing " +
                 "keys and CI tokens. A key that is on is passed to the harness as " +
-                "an environment variable at launch and never written to disk. " +
-                "Register the matching provider on the harness's own Models page; " +
-                "it resolves apiKeyEnv by name. Restart the server to apply.",
+                "an environment variable at launch and never written to disk, and " +
+                "its provider route is registered in the harness automatically. " +
+                "Restart the server to apply.",
         )
     }
 }

@@ -217,6 +217,19 @@ class DshCredentialsTest {
         assertNull(env[DshCredentials.ENV_KEY], "must be null (remove), never \"\" (set-but-empty)")
     }
 
+    @Test
+    fun `suppliedNames claims the variable only when a value actually resolved`() = runTest {
+        // The bug: claiming it unconditionally meant childEnv mapped the name to
+        // null (a removal) while the sync skipped it as "already supplied", so a
+        // ticked DEEPSEEK_API_KEY secret was never injected AND any inherited one
+        // was unset.
+        assertEquals(emptySet(), DshCredentials(context(null, null)).suppliedNames())
+        assertEquals(
+            setOf(DshCredentials.ENV_KEY),
+            DshCredentials(context(FakeLlm(listOf(llmConfig("DEEPSEEK", "k"))), null)).suppliedNames(),
+        )
+    }
+
     // ------------------------------------------------------------- resilience
 
     @Test

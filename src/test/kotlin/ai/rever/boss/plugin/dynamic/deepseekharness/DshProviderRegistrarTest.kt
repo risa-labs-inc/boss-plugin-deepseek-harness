@@ -254,6 +254,65 @@ class DshProviderRegistrarTest {
     }
 
     @Test
+    fun `a four-space indented block with a sibling key refuses instead of deleting it`() {
+        // The guard was line-shape based: TOP_KEY required a key within 1-3 spaces,
+        // so on a 4-space file it matched nothing, the "unrecognised key" check
+        // never fired, and the whole-block rewrite DELETED `defaultProvider`.
+        val original = """
+            llm-pi-ai:
+                defaultProvider: google
+                providers:
+                    google:
+                        apiKeyEnv: GOOGLE_API_KEY
+        """.trimIndent() + "\n"
+        settings.writeText(original)
+
+        val outcome = registrar.register(listOf(DshRouteAddition("openai", "OPENAI_API_KEY")))
+
+        assertTrue(outcome is DshRegisterOutcome.TooComplex, "expected a refusal, got $outcome")
+        assertEquals(original, settings.readText(), "the sibling key must survive")
+        assertTrue(settings.readText().contains("defaultProvider: google"))
+    }
+
+    @Test
+    fun `a blank line between routes does not produce a duplicate route key`() {
+        // PI_AI_BLOCK's body repetition stopped at the first blank line, so routes
+        // below it were invisible to existingRoutes(): `openai` was proposed as
+        // new, the truncated block was rewritten, and the orphaned fragment left
+        // behind gave two `openai:` keys - a hard error for most YAML parsers.
+        val original = """
+            llm-pi-ai:
+              providers:
+                google:
+                  apiKeyEnv: GOOGLE_API_KEY
+
+                openai:
+                  apiKeyEnv: OPENAI_API_KEY
+        """.trimIndent() + "\n"
+        settings.writeText(original)
+
+        registrar.register(listOf(DshRouteAddition("openai", "OPENAI_API_KEY")))
+
+        val after = settings.readText()
+        assertEquals(
+            1,
+            Regex("^\\s+openai:", RegexOption.MULTILINE).findAll(after).count(),
+            "a duplicate route key would be invalid YAML:\n$after",
+        )
+    }
+
+    @Test
+    fun `a comment inside the block refuses rather than dropping it`() {
+        val original = "llm-pi-ai:\n  # keep in sync with the runbook\n  providers: { google: { apiKeyEnv: GOOGLE_API_KEY } }\n"
+        settings.writeText(original)
+
+        val outcome = registrar.register(listOf(DshRouteAddition("openai", "OPENAI_API_KEY")))
+
+        assertTrue(outcome is DshRegisterOutcome.TooComplex, "got $outcome")
+        assertEquals(original, settings.readText())
+    }
+
+    @Test
     fun `output is canonical block style so a diff is readable`() {
         val rendered = registrar.renderPiAiBlock(mapOf("openai" to "OPENAI_API_KEY", "google" to "GOOGLE_API_KEY"))
 

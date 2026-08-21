@@ -78,14 +78,6 @@ class DshEngine(
     }
 
     /**
-     * The complete environment handed to a harness child: the DeepSeek provider
-     * key (or its removal) plus every secret the user ticked.
-     *
-     * Assembled in one place so the server and the one-shot `ask` path cannot
-     * drift - a key that worked in the web UI but not in dsh_ask would be a
-     * miserable thing to debug.
-     */
-    /**
      * Register a harness route for every key being injected that maps to one.
      *
      * Run before each launch rather than once, because the set of injected keys
@@ -101,8 +93,36 @@ class DshEngine(
         return outcome
     }
 
-    private suspend fun childEnv(): Map<String, String?> =
-        credentials.childEnv() + secretSync.envFor(_keySelection.value, credentials.suppliedNames())
+    /**
+     * The complete environment handed to a harness child: the DeepSeek provider
+     * key (or its removal) plus every secret the user ticked.
+     *
+     * Assembled in one place so the server and the one-shot `ask` path cannot
+     * drift - a key that worked in the web UI but not in dsh_ask would be a
+     * miserable thing to debug.
+     */
+    /**
+     * A trailing note when provider registration declined, and nothing otherwise.
+     *
+     * Both launch paths used to discard the outcome, so a refusal was only visible
+     * to someone who thought to run `dsh_doctor` - the reported symptom would be
+     * "I turned the key on and nothing happened".
+     */
+    private fun registerNote(): String = when (val r = _lastRegister.value) {
+        is DshRegisterOutcome.TooComplex ->
+            "\n\nNote: provider routes were not registered - ${r.reason}. Add this to " +
+                "$home/settings.yaml under `llm-pi-ai:` yourself:\n\n${r.manualYaml}"
+        is DshRegisterOutcome.Failed -> "\n\nNote: provider routes were not registered - ${r.reason}"
+        else -> ""
+    }
+
+    private suspend fun childEnv(): Map<String, String?> {
+        val provider = credentials.childEnv()
+        // Only names that actually resolved are "supplied"; a name mapped to null
+        // is a removal, and a ticked secret must be allowed to fill it.
+        val supplied = provider.filterValues { it != null }.keys
+        return provider + secretSync.envFor(_keySelection.value, supplied)
+    }
 
     suspend fun refreshInstall() {
         val node = DshCli.which("node")
@@ -165,7 +185,7 @@ class DshEngine(
         _busy.value = "Starting dsh web"
         return try {
             when (val outcome = server.start(ready.dsh, workspaceRoot(), childEnv(), overlay)) {
-                is DshServer.Running -> "dsh web is serving ${outcome.url} (pid ${outcome.pid})."
+                is DshServer.Running -> "dsh web is serving ${outcome.url} (pid ${outcome.pid})." + registerNote()
                 is DshServer.Failed -> "dsh web did not start: ${outcome.reason}"
                 else -> "dsh web is ${outcome::class.simpleName}."
             }
@@ -203,7 +223,8 @@ class DshEngine(
         )
 
         return when {
-            exec.ok -> exec.stdout.trim().ifBlank { "(the harness completed the turn with no text)" } to false
+            exec.ok -> (exec.stdout.trim().ifBlank { "(the harness completed the turn with no text)" } +
+                registerNote()) to false
             exec.timedOut -> "The task exceeded ${timeoutSeconds}s and was stopped." to true
             exec.missing -> "DeepSeek Harness could not be started." to true
             exec.message.contains(DshCredentials.MISSING_MARKER) ->

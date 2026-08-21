@@ -46,8 +46,10 @@ sealed interface DshRegisterOutcome {
  * re-emitting those from a regex would silently drop them. When anything beyond a
  * bare `apiKeyEnv` appears, [register] refuses and hands back the YAML to paste.
  *
- * A timestamped backup is taken before any write, because "it refused when unsure"
- * is only half a promise if the half it did write is unrecoverable.
+ * A backup is taken before any write - `settings.yaml.boss-backup`, replaced each
+ * time - because "it refused when unsure" is only half a promise if the half it
+ * did write is unrecoverable. Not timestamped: this runs on every launch, and a
+ * directory filling with dated copies of a config file is its own problem.
  *
  * ## Route names are verified, never guessed
  *
@@ -140,6 +142,21 @@ class DshProviderRegistrar(private val env: Map<String, String> = System.getenv(
             original.replaceRange(block.range, rendered.trimEnd() + "\n")
         }
 
+        // Verify before committing. The line-shape guards above are necessary but
+        // not sufficient: a 4-space-indented block hid a sibling key from TOP_KEY,
+        // and a blank line between routes truncated PI_AI_BLOCK so routes below it
+        // were invisible - the first silently deleted the sibling, the second
+        // produced a duplicate route key. Re-parsing the candidate output and
+        // requiring it to round-trip to `merged` turns any shape this writer does
+        // not understand, now or later, into a refusal instead of a rewrite.
+        val check = piAiBlock(updated)?.let { parseSimpleProfiles(it) }
+        if (check != merged) {
+            return DshRegisterOutcome.TooComplex(
+                reason = "the harness's llm-pi-ai settings are shaped in a way this plugin will not rewrite safely",
+                manualYaml = renderProvidersEntries(additions.associate { it.route to it.apiKeyEnv }),
+            )
+        }
+
         return runCatching {
             val backup = File(file.parentFile, "settings.yaml.boss-backup")
             file.copyTo(backup, overwrite = true)
@@ -181,23 +198,101 @@ class DshProviderRegistrar(private val env: Map<String, String> = System.getenv(
      * costs them a `models` list they tuned by hand.
      */
     internal fun parseSimpleProfiles(block: MatchResult): Map<String, String>? {
-        val body = block.value.lines().drop(1).joinToString("\n")
-        // Any key under llm-pi-ai other than `providers` is unrecognised.
-        val topKeys = TOP_KEY.findAll(body).map { it.groupValues[1] }.toSet()
-        if (topKeys.any { it != "providers" }) return null
+        val body = block.value.lines().drop(1).dropLastWhile { it.isBlank() }
+        val meaningful = body.filter { it.isNotBlank() }
+        if (meaningful.isEmpty()) return emptyMap()
 
-        val region = providersValue(block) ?: return emptyMap()
-        // Every option name that appears must be apiKeyEnv, or we cannot re-emit.
-        val options = OPTION_KEY.findAll(region).map { it.groupValues[1] }.toSet()
-        if (options.any { it != "apiKeyEnv" }) return null
-        if (region.contains('[') || region.contains('-')) return null
+        // A comment would be dropped by the rewrite, and losing a user's config
+        // text is worse than refusing.
+        if (meaningful.any { it.trimStart().startsWith("#") }) return null
 
-        val pairs = SIMPLE_PROFILE.findAll(region).associate { it.groupValues[1] to it.groupValues[2] }
-        // A route present but not parsed as a simple profile means an unhandled shape.
-        val routes = ROUTE_KEY.findAll(region).map { it.groupValues[1] }.toSet()
-        if (routes != pairs.keys) return null
-        return pairs
+        // Derive the block's own indent instead of assuming a width. Assuming
+        // 1-3 spaces meant a 4-space file matched no keys at all, so the
+        // "unrecognised sibling key" check never fired and the rewrite silently
+        // deleted the sibling.
+        val base = meaningful.minOf { it.takeWhile { c -> c == ' ' || c == '\t' }.length }
+        val topLines = meaningful.filter { indentOf(it) == base }
+        val topKeys = topLines.mapNotNull { KEY_LINE.find(it)?.groupValues?.get(1) }
+        if (topKeys.size != topLines.size) return null
+        if (topKeys != listOf("providers")) return null
+
+        val providersLine = topLines.single()
+        val inlineValue = providersLine.substringAfter(':', "").trim()
+        val deeper = meaningful.filter { indentOf(it) > base }
+
+        // Flow style on one line: `providers: { a: { apiKeyEnv: X }, b: {...} }`.
+        if (inlineValue.isNotEmpty()) {
+            if (deeper.isNotEmpty()) return null
+            return parseFlowProfiles(inlineValue)
+        }
+        if (deeper.isEmpty()) return emptyMap()
+
+        // Block style: route keys at one indent, exactly one `apiKeyEnv` under each.
+        val routeIndent = deeper.minOf { indentOf(it) }
+        val profiles = LinkedHashMap<String, String>()
+        var current: String? = null
+        for (line in deeper) {
+            val indent = indentOf(line)
+            val match = KEY_LINE.find(line) ?: return null
+            val key = match.groupValues[1]
+            val value = line.substringAfter(':', "").trim()
+            when (indent) {
+                routeIndent -> {
+                    if (value.isNotEmpty()) {
+                        // `route: { apiKeyEnv: X }` nested one level down.
+                        val flow = parseFlowProfiles("{ $key: $value }") ?: return null
+                        profiles += flow
+                        current = null
+                    } else {
+                        if (profiles.containsKey(key)) return null
+                        current = key
+                    }
+                }
+                else -> {
+                    // Only a bare apiKeyEnv may live under a route; anything else
+                    // (models, compat, retryPolicy...) cannot be re-emitted.
+                    if (key != "apiKeyEnv" || current == null) return null
+                    if (!ENV_VALUE.matches(value)) return null
+                    if (profiles.put(current, value) != null) return null
+                    current = null
+                }
+            }
+        }
+        // A route header with no apiKeyEnv beneath it is a shape we cannot re-emit.
+        if (current != null) return null
+        return profiles
     }
+
+    /** `{ a: { apiKeyEnv: X }, b: { apiKeyEnv: Y } }`, or null for anything else. */
+    private fun parseFlowProfiles(text: String): Map<String, String>? {
+        val inner = text.trim().removeSurrounding("{", "}").trim()
+        if (inner.isEmpty()) return emptyMap()
+        val profiles = LinkedHashMap<String, String>()
+        for (part in splitTopLevel(inner)) {
+            val match = FLOW_PROFILE.matchEntire(part.trim()) ?: return null
+            if (profiles.put(match.groupValues[1], match.groupValues[2]) != null) return null
+        }
+        return profiles
+    }
+
+    /** Split on commas that are not inside braces. */
+    private fun splitTopLevel(text: String): List<String> {
+        val out = mutableListOf<String>()
+        var depth = 0
+        val buf = StringBuilder()
+        for (c in text) {
+            when (c) {
+                '{' -> { depth++; buf.append(c) }
+                '}' -> { depth--; buf.append(c) }
+                ',' -> if (depth == 0) { out += buf.toString(); buf.clear() } else buf.append(c)
+                else -> buf.append(c)
+            }
+        }
+        if (buf.isNotBlank()) out += buf.toString()
+        return out
+    }
+
+    private fun indentOf(line: String) = line.takeWhile { it == ' ' || it == '\t' }.length
 
     // ----------------------------------------------------------------- emitting
 
@@ -294,21 +389,32 @@ class DshProviderRegistrar(private val env: Map<String, String> = System.getenv(
             { it.apiKeyEnv },
         )
 
-        private val PI_AI_BLOCK = Regex("^llm-pi-ai:[ \\t]*\\n(?:[ \\t]+\\S.*\\n?)*", RegexOption.MULTILINE)
+        /**
+         * The `llm-pi-ai:` block, INCLUDING blank lines inside it.
+         *
+         * The first version stopped at the first blank line, so routes below one
+         * were invisible to both the route scan and the parser - the rewrite then
+         * emitted a block that already existed further down, producing a duplicate
+         * YAML key. Blank lines between provider entries are ordinary formatting.
+         */
+        private val PI_AI_BLOCK =
+            Regex("^llm-pi-ai:[ \\t]*\\n(?:[ \\t]*\\n|[ \\t]+\\S.*\\n?)*", RegexOption.MULTILINE)
         private val PROVIDERS_REGION = Regex("^[ \\t]+providers:.*(?:\\n[ \\t]{3,}\\S.*)*", RegexOption.MULTILINE)
 
-        /** A key at the first indent level under `llm-pi-ai:`. */
-        private val TOP_KEY = Regex("^[ \\t]{1,3}([A-Za-z][A-Za-z0-9_-]*)\\s*:", RegexOption.MULTILINE)
 
         /** A route name, in flow or block style. */
         private val ROUTE_KEY = Regex("""([A-Za-z][A-Za-z0-9_-]*)\s*:\s*[{\n]""")
 
-        /** An option name inside a profile. */
-        private val OPTION_KEY = Regex("""\b(apiKeyEnv|baseURL|models|modelOverrides|compat|retryPolicy|api|displayName|reasoning|streamIdleTimeoutMs)\s*:""")
+        /** `key:` at the start of a line, with whatever follows captured separately. */
+        private val KEY_LINE = Regex("""^[ \t]*([A-Za-z][A-Za-z0-9_-]*)\s*:""")
 
-        /** `route: { apiKeyEnv: NAME }` or its block equivalent. */
-        private val SIMPLE_PROFILE = Regex(
-            """([A-Za-z][A-Za-z0-9_-]*)\s*:\s*\{?\s*apiKeyEnv\s*:\s*([A-Z][A-Z0-9_]{2,63})\s*\}?""",
-        )
+        /** One flow profile: `route: { apiKeyEnv: NAME }`. */
+        private val FLOW_PROFILE =
+            Regex("""([A-Za-z][A-Za-z0-9_-]*)\s*:\s*\{\s*apiKeyEnv\s*:\s*([A-Z][A-Z0-9_]{2,63})\s*}""")
+
+        /** A bare environment variable name as a value. */
+        private val ENV_VALUE = Regex("""[A-Z][A-Z0-9_]{2,63}""")
+
+
     }
 }
