@@ -19,6 +19,8 @@ class DshEngine(
 ) {
 
     val credentials = DshCredentials(context)
+    val secretSync = DshSecretSync(context, env)
+    val registrar = DshProviderRegistrar(env)
     val bridge = DshMcpBridge(env)
     val server = DshWebServer(env)
 
@@ -37,6 +39,17 @@ class DshEngine(
     private val _bridgeEnabled = MutableStateFlow(false)
     val bridgeEnabled: StateFlow<Boolean> = _bridgeEnabled.asStateFlow()
 
+    private val _keyCandidates = MutableStateFlow<List<DshKeyCandidate>>(emptyList())
+    val keyCandidates: StateFlow<List<DshKeyCandidate>> = _keyCandidates.asStateFlow()
+
+    private val _keySelection = MutableStateFlow(DshKeySelection())
+    val keySelection: StateFlow<DshKeySelection> = _keySelection.asStateFlow()
+
+    private val _lastRegister = MutableStateFlow<DshRegisterOutcome>(DshRegisterOutcome.UpToDate)
+
+    /** Outcome of the most recent provider registration, for the panel and doctor. */
+    val lastRegister: StateFlow<DshRegisterOutcome> = _lastRegister.asStateFlow()
+
     private val _busy = MutableStateFlow<String?>(null)
 
     /** Non-null while a long operation runs, carrying a label for the panel. */
@@ -52,7 +65,44 @@ class DshEngine(
         refreshInstall()
         refreshProfiles()
         refreshKeySource()
+        refreshKeyCandidates()
     }
+
+    suspend fun refreshKeyCandidates() {
+        _keyCandidates.value = secretSync.candidates()
+    }
+
+    /** Restored from plugin storage at start; see DshServices. */
+    fun setKeySelection(selection: DshKeySelection) {
+        _keySelection.value = selection
+    }
+
+    /**
+     * The complete environment handed to a harness child: the DeepSeek provider
+     * key (or its removal) plus every secret the user ticked.
+     *
+     * Assembled in one place so the server and the one-shot `ask` path cannot
+     * drift - a key that worked in the web UI but not in dsh_ask would be a
+     * miserable thing to debug.
+     */
+    /**
+     * Register a harness route for every key being injected that maps to one.
+     *
+     * Run before each launch rather than once, because the set of injected keys
+     * changes when the user ticks a switch or adds a secret, and a route is only
+     * ever written when its credential will actually be present - the harness
+     * fails a route whose `apiKeyEnv` resolves to nothing rather than falling
+     * through to another. Idempotent, so the common case touches no file.
+     */
+    suspend fun syncProviders(): DshRegisterOutcome {
+        val names = secretSync.namesFor(_keySelection.value, credentials.suppliedNames())
+        val outcome = registrar.register(registrar.plan(names))
+        _lastRegister.value = outcome
+        return outcome
+    }
+
+    private suspend fun childEnv(): Map<String, String?> =
+        credentials.childEnv() + secretSync.envFor(_keySelection.value, credentials.suppliedNames())
 
     suspend fun refreshInstall() {
         val node = DshCli.which("node")
@@ -111,9 +161,10 @@ class DshEngine(
         val ready = _install.value as? DshInstall.Ready
             ?: return "DeepSeek Harness is not installed. Open the DeepSeek Harness panel to install it."
         val overlay = if (_bridgeEnabled.value) bridge.overlayFile().takeIf { it.isFile } else null
+        syncProviders()
         _busy.value = "Starting dsh web"
         return try {
-            when (val outcome = server.start(ready.dsh, workspaceRoot(), credentials.childEnv(), overlay)) {
+            when (val outcome = server.start(ready.dsh, workspaceRoot(), childEnv(), overlay)) {
                 is DshServer.Running -> "dsh web is serving ${outcome.url} (pid ${outcome.pid})."
                 is DshServer.Failed -> "dsh web did not start: ${outcome.reason}"
                 else -> "dsh web is ${outcome::class.simpleName}."
@@ -142,11 +193,12 @@ class DshEngine(
             ?: return "DeepSeek Harness is not installed on this machine." to true
 
         if (task.isBlank()) return "A task is required." to true
+        syncProviders()
 
         val exec = DshCli.exec(
             argv = listOf(ready.dsh.absolutePath, "--profile", "headless", task),
             cwd = cwd,
-            extraEnv = credentials.childEnv(),
+            extraEnv = childEnv(),
             timeoutSeconds = timeoutSeconds,
         )
 

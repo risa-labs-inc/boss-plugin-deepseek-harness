@@ -33,6 +33,14 @@ class DshServices(val context: PluginContext) {
             // while the toggle showed as on.
             val enabled = getPref(KEY_BRIDGE, "false").toBoolean()
             if (enabled) engine.setBridgeEnabled(true, bossMcpUrl())
+            // Restore before the first launch, or a server started from a
+            // restored session would run without the keys the panel shows ticked.
+            engine.setKeySelection(
+                DshKeySelection(
+                    enabled = decodeIds(getPref(KEY_KEYS_ON, "")),
+                    disabled = decodeIds(getPref(KEY_KEYS_OFF, "")),
+                ),
+            )
             engine.refreshAll()
         }
     }
@@ -63,6 +71,22 @@ class DshServices(val context: PluginContext) {
     fun bossMcpUrl(): String {
         val port = System.getenv(ENV_MCP_PORT)?.trim()?.toIntOrNull() ?: DEFAULT_MCP_PORT
         return "http://127.0.0.1:$port/mcp"
+    }
+
+    /**
+     * Expose, or stop exposing, one BOSS secret to the harness.
+     *
+     * Stored by secret id rather than by name: a renamed secret keeps its
+     * selection, and an id cannot collide the way two secrets sharing an
+     * `ANTHROPIC_API_KEY` username can.
+     */
+    fun setKeySelected(candidate: DshKeyCandidate, selected: Boolean) {
+        val next = engine.keySelection.value.with(candidate.secretId, selected, candidate.onByDefault)
+        engine.setKeySelection(next)
+        scope.launch {
+            setPref(KEY_KEYS_ON, next.enabled.sorted().joinToString(","))
+            setPref(KEY_KEYS_OFF, next.disabled.sorted().joinToString(","))
+        }
     }
 
     // ------------------------------------------------------------------ tabs
@@ -129,6 +153,12 @@ class DshServices(val context: PluginContext) {
     companion object {
         const val PLUGIN_ID = "ai.rever.boss.plugin.dynamic.deepseekharness"
         const val KEY_BRIDGE = "bossMcpBridgeEnabled"
+        const val KEY_KEYS_ON = "providerKeysOn"
+        const val KEY_KEYS_OFF = "providerKeysOff"
+
+        /** Tolerates the empty string and stray separators from an older write. */
+        internal fun decodeIds(raw: String): Set<String> =
+            raw.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
 
         /** Set by the host when its MCP server is not on the default port. */
         private const val ENV_MCP_PORT = "BOSS_MCP_PORT"

@@ -24,6 +24,8 @@ DshMcpBridge       the opt-in cordis patch overlay
 DshMcpTools        the dsh_* tools
 DshPaths           $DSH_HOME resolution (pure - creates nothing)
 DshIcon            the DeepSeek whale, shared by the panel and the tab
+DshSecretSync      which BOSS secrets to inject, and the defaults
+DshProviderRegistrar  writes provider routes into the harness's settings.yaml
 ```
 
 ## Verified facts about the harness
@@ -97,6 +99,80 @@ of these after a harness upgrade.
   `thin` classifier so the two cannot collide; without it you can ship a jar that
   loads with no panel and no tools.
 
+## Provider keys and routes
+
+Two halves, deliberately split the way the harness itself splits them: the
+harness owns provider *registration*, BOSS owns the *credential*. Its
+`llm-pi-ai` README is explicit that `apiKeyEnv` is a credential reference and
+"no secret enters this file", so nothing here ever writes a secret to disk.
+
+`DshSecretSync` picks which BOSS secrets to inject. `DshProviderRegistrar` writes
+the matching routes into `$DSH_HOME/settings.yaml`.
+
+### Route names are PROBED, never guessed
+
+A route pi-ai does not ship registers **no adapter at all** and fails only when a
+request reaches it (`NO_ADAPTER: no adapter registered for provider "x"`). It does
+NOT fail at boot, so a wrong name is a silent misconfiguration that surfaces later
+as a broken harness.
+
+The probe, against `dsh 0.1.0-rc.7`: set one route plus `agent-default-model`
+naming a nonexistent model, run one turn with stdin closed, and read stderr.
+`UNKNOWN_MODEL` means the route resolved and its catalog was consulted; `NO_ADAPTER`
+means pi-ai ships nothing under that key.
+
+| Verdict | Routes |
+|---|---|
+| valid | `openai` `anthropic` `deepseek` `google` `xai` `together` `mistral` `groq` `openrouter` `fireworks` `cerebras` `nvidia` |
+| **not shipped** | `gemini` `grok` `togetherai` `cohere` `perplexity` `moonshot` `azure` `bedrock` |
+
+The three traps are `gemini` (it is `google`), `grok` (it is `xai`) and
+`togetherai` (it is `together`) - all three read like the obvious name and ship
+nothing. `DshProviderRegistrarTest` fails if any mapped route is outside
+`VERIFIED_ROUTES` or inside `KNOWN_ABSENT_ROUTES`. Re-probe after a dsh upgrade.
+
+**Probe gotcha:** `dsh` inside a shell loop consumes the loop's stdin and exits
+before writing anything, so the first two enumeration runs came back uniformly
+empty. Redirect `</dev/null` and capture stderr to a *file* - piping to `head`
+closes the pipe before dsh writes and loses the line too.
+
+### Why keys default on, but not all of them
+
+The user asked for keys to work without ticking a box each, so a recognised
+provider key defaults ON. It is an explicit allowlist (`PROVIDER_KEYS`), not a
+`*_KEY` pattern, because a real secret store also holds `MACOS_P12_CERTIFICATE`,
+`GPG_SIGNING_KEY`, `SUPABASE_SERVICE_ROLE_KEY` and ~25 CI secrets whose names end
+the same way. An allowlist fails closed: an unknown provider shows up off rather
+than a certificate showing up on. Swapping it for `endsWith("_KEY")` fails three
+tests.
+
+Two secrets claiming one variable name default OFF rather than being guessed
+between - a wrong API key fails as though the provider rejected you.
+
+`DshKeySelection` is **two** override sets, not one selected-set. With a default
+of *on*, "off" is a real state: a single set makes it indistinguishable from
+"never chose", so a key turned off returns at the next launch.
+
+### Writing settings.yaml, and when it refuses
+
+There is no YAML parser in the host, and pulling one in would round-trip the whole
+document through a serializer that drops comments and reorders keys - worse for a
+config file than a targeted edit. So the registrar only writes when the existing
+`llm-pi-ai` block round-trips exactly: `{ route: { apiKeyEnv: NAME } }` shapes and
+nothing else. A `models` list, `compat`, `retryPolicy`, `baseURL` or
+`modelOverrides` makes it refuse and hand back the YAML to paste. A backup is
+taken before any write.
+
+It never touches `agent-default-model`: registering a provider is not switching
+which vendor bills the next turn.
+
+**Two bugs that only showed up when run against a real file**, both now pinned:
+the route-name regex matched `providers:` itself, so the parsed set never equalled
+the found set and it refused the commonest shape; and several env names mapping to
+one route were deduped with `distinctBy` over a Set, which on a real store picked
+a colleague's `OPEN_AI_API_KEY` over the user's own `OPENAI_API_KEY`. There is now
+a canonical spelling per route.
+
 ## The icon
 
 `DshIcon.kt` holds the DeepSeek whale as an `ImageVector`, aliased once and used
@@ -144,7 +220,7 @@ filter when answering a question about one setting.
 ## Testing
 
 ```bash
-./gradlew build   # 54 tests
+./gradlew build   # 103 tests
 ```
 
 Count results from `build/test-results/test/*.xml`, not from "BUILD SUCCESSFUL" -
@@ -165,7 +241,13 @@ secrets, no terminal and no project open.
 
 ## Not verified
 
-**No model turn has ever run through this plugin.** The verification machine has
-no DeepSeek key, so `dsh_ask` has only been exercised down its
-`MISSING_CREDENTIAL` path. The first real turn will be a user's. One
-`dsh_ask` with a key configured retires this.
+The web UI's **provider-keys panel section has not been seen rendered** - the
+detection logic is tested and the doctor output confirms the wiring, but nobody
+has looked at the switches.
+
+Everything else here has run end to end against a real harness: a model turn
+completes (`dsh_ask`), keys inject, and routes register into a real
+`settings.yaml`. The turn ran on a **Google** provider configured through the
+harness's own Models page, not on DeepSeek - there is still no DeepSeek key on the
+build machine, so `dsh_ask`'s DeepSeek-specific `MISSING_CREDENTIAL` remapping has
+only been exercised down its failure path.

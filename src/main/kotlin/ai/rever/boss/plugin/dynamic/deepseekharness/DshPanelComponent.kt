@@ -72,6 +72,8 @@ private fun DshPanel(viewModel: DshPanelViewModel) {
     val profiles by viewModel.profiles.collectAsState()
     val keySource by viewModel.keySource.collectAsState()
     val bridgeEnabled by viewModel.bridgeEnabled.collectAsState()
+    val keyCandidates by viewModel.keyCandidates.collectAsState()
+    val keySelection by viewModel.keySelection.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val expanded by viewModel.expanded.collectAsState()
 
@@ -109,6 +111,15 @@ private fun DshPanel(viewModel: DshPanelViewModel) {
             )
             if (DshPanelViewModel.Section.PROFILES in expanded) {
                 ProfilesBody(profiles, viewModel.homePath)
+            }
+
+            SectionHeader(
+                DshPanelViewModel.Section.KEYS,
+                expanded,
+                viewModel::toggleSection,
+            )
+            if (DshPanelViewModel.Section.KEYS in expanded) {
+                KeysBody(keyCandidates, keySelection, viewModel)
             }
 
             SectionHeader(
@@ -309,6 +320,77 @@ private fun ProfilesBody(profiles: List<DshProfile>, homePath: String) {
                 }
             }
         }
+    }
+}
+
+/**
+ * The provider-key section.
+ *
+ * Every row is opt-in and starts off. That is not caution for its own sake: a
+ * real secret store holds code-signing certificates, a Supabase service-role key
+ * and dozens of CI secrets whose names end in `_KEY` exactly like an API key's
+ * does, so anything automatic here would hand those to an agent. The list only
+ * offers; a tick is the only thing that exposes anything.
+ */
+@Composable
+private fun KeysBody(
+    candidates: List<DshKeyCandidate>,
+    selection: DshKeySelection,
+    viewModel: DshPanelViewModel,
+) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(bottom = 10.dp)) {
+        if (candidates.isEmpty()) {
+            Text(
+                "No secrets look like provider keys. A secret qualifies when its " +
+                    "username is an environment variable name, e.g. OPENAI_API_KEY.",
+                color = BossThemeColors.TextMuted,
+                fontSize = 10.sp,
+            )
+            return@Column
+        }
+        candidates.forEach { candidate ->
+            val isOn = selection.isOn(candidate)
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        candidate.envName,
+                        color = BossThemeColors.TextPrimary,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    Text(
+                        // The harness hint is the useful part: a key it already
+                        // references starts working the moment it is ticked,
+                        // whereas any other name needs a route in the harness UI.
+                        when {
+                            candidate.conflicted ->
+                                "${candidate.label} - another secret claims this same name, so pick one"
+                            candidate.referencedByHarness -> "${candidate.label} - the harness asks for this one"
+                            candidate.recognisedProvider -> candidate.label
+                            else -> "${candidate.label} - not a known provider key"
+                        },
+                        color = BossThemeColors.TextMuted,
+                        fontSize = 9.sp,
+                    )
+                }
+                Switch(
+                    checked = isOn,
+                    onCheckedChange = { viewModel.setKeySelected(candidate, it) },
+                    colors = SwitchDefaults.colors(checkedThumbColor = BossThemeColors.AccentColor),
+                )
+            }
+        }
+        Note(
+            "Recognised provider keys are on by default; anything else is off " +
+                "until you turn it on, because a secret store also holds signing " +
+                "keys and CI tokens. A key that is on is passed to the harness as " +
+                "an environment variable at launch and never written to disk. " +
+                "Register the matching provider on the harness's own Models page; " +
+                "it resolves apiKeyEnv by name. Restart the server to apply.",
+        )
     }
 }
 

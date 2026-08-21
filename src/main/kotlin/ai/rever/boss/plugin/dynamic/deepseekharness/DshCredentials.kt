@@ -93,6 +93,16 @@ class DshCredentials(private val context: PluginContext) {
      */
     suspend fun childEnv(): Map<String, String?> = mapOf(ENV_KEY to resolve())
 
+    /**
+     * Names this class supplies, so [DshSecretSync] does not overwrite them.
+     *
+     * A ticked secret and a configured AI provider can both name
+     * `DEEPSEEK_API_KEY`; the provider is the more specific statement of intent,
+     * so it wins and the sync skips that name rather than the two racing on map
+     * insertion order.
+     */
+    fun suppliedNames(): Set<String> = setOf(ENV_KEY)
+
     private fun fromProvider(): String? {
         val provider = context.llmProvider ?: return null
         val configs = runCatching { provider.configuredProviders() }.getOrNull().orEmpty()
