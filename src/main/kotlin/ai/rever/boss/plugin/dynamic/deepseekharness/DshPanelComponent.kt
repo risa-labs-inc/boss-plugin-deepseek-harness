@@ -411,8 +411,9 @@ private fun BridgeBody(enabled: Boolean, viewModel: DshPanelViewModel) {
             )
         }
         Note(
-            "When on, harness agents can call every BOSS tool as " +
-                "mcp__${DshMcpBridge.SERVER_NAME}__*. An MCP server is trusted code running " +
+            "When on, harness agents can call every BOSS tool under the same " +
+                "mcp__<server>__* names BOSS's own in-terminal agents use. An MCP " +
+                "server is trusted code running " +
                 "outside the harness's own agent sandbox, which is why the harness enables none " +
                 "by default. Restart the server to apply a change.",
         )

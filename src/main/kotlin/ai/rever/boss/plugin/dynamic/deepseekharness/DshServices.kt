@@ -1,5 +1,6 @@
 package ai.rever.boss.plugin.dynamic.deepseekharness
 
+import ai.rever.boss.plugin.api.McpServerController
 import ai.rever.boss.plugin.api.NotificationType
 import ai.rever.boss.plugin.api.PluginContext
 import ai.rever.boss.plugin.api.PluginStorageProvider
@@ -32,7 +33,11 @@ class DshServices(val context: PluginContext) {
             // started from a restored session would compose without the overlay
             // while the toggle showed as on.
             val enabled = getPref(KEY_BRIDGE, "false").toBoolean()
-            if (enabled) engine.setBridgeEnabled(true, bossMcpUrl())
+            if (enabled) {
+                // Re-resolve rather than trust the stored overlay: the bound port
+                // can differ from the one recorded last run.
+                bossMcpEndpoint()?.let { engine.setBridgeEnabled(true, it.first, it.second) }
+            }
             // Restore before the first launch, or a server started from a
             // restored session would run without the keys the panel shows ticked.
             engine.setKeySelection(
@@ -56,21 +61,47 @@ class DshServices(val context: PluginContext) {
     // ------------------------------------------------------------ preferences
 
     fun setBridgeEnabled(enabled: Boolean): String {
-        val message = engine.setBridgeEnabled(enabled, bossMcpUrl())
-        scope.launch { setPref(KEY_BRIDGE, enabled.toString()) }
+        if (enabled) {
+            val endpoint = bossMcpEndpoint()
+                ?: return "BOSS's MCP server is not running, so there is no endpoint to point the " +
+                    "harness at. Turn it on from the Toolbox's MCP tab and try again."
+            val message = engine.setBridgeEnabled(true, endpoint.first, endpoint.second)
+            scope.launch { setPref(KEY_BRIDGE, "true") }
+            return message
+        }
+        val message = engine.setBridgeEnabled(false, DshMcpBridge.DEFAULT_SERVER_NAME, "")
+        scope.launch { setPref(KEY_BRIDGE, "false") }
         return message
     }
 
     /**
-     * The MCP endpoint the harness should call back into.
+     * The MCP endpoint the harness should call back into, or null when there
+     * isn't one.
      *
-     * BOSS's own MCP server is loopback-only and streamable-HTTP at `/mcp`. The
-     * port is read from the environment when the host published it, so a
-     * non-default port still works, and falls back to the standard one.
+     * Asked of [McpServerController], never guessed. The first version hardcoded
+     * 7677 and was simply wrong: **7677 is BossTerm's MCP server; BOSS's is on
+     * 7679**, with 7680 for a second instance. So the bridge pointed at the wrong
+     * server (or at a dead port when standalone BossTerm was not running) and no
+     * BOSS tool ever reached the harness. There is no `BOSS_MCP_PORT` env var
+     * either - that was an invented knob the host never sets.
+     *
+     * The controller reports the **bound** port, which its own doc notes may be a
+     * fallback, and the server name, which is `boss` inside BOSS and `bossterm`
+     * in a standalone BossTerm. Both are read live because both can change
+     * between runs; nothing here is cached.
+     *
+     * Resolved per call and never at `register()`: plugin load order is not
+     * guaranteed, so terminal-tab may not have loaded yet.
      */
-    fun bossMcpUrl(): String {
-        val port = System.getenv(ENV_MCP_PORT)?.trim()?.toIntOrNull() ?: DEFAULT_MCP_PORT
-        return "http://127.0.0.1:$port/mcp"
+    fun bossMcpEndpoint(): Pair<String, String>? {
+        val controller = runCatching {
+            context.getPluginAPI(McpServerController::class.java)
+        }.getOrNull() ?: return null
+        val state = runCatching { controller.state.value }.getOrNull() ?: return null
+        if (!state.running) return null
+        val port = state.port ?: return null
+        val name = state.serverName.takeIf { it.isNotBlank() } ?: DshMcpBridge.DEFAULT_SERVER_NAME
+        return name to "http://127.0.0.1:$port/mcp"
     }
 
     /**
@@ -159,10 +190,6 @@ class DshServices(val context: PluginContext) {
         /** Tolerates the empty string and stray separators from an older write. */
         internal fun decodeIds(raw: String): Set<String> =
             raw.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-
-        /** Set by the host when its MCP server is not on the default port. */
-        private const val ENV_MCP_PORT = "BOSS_MCP_PORT"
-        private const val DEFAULT_MCP_PORT = 7677
 
         private const val TAB_POLL_ATTEMPTS = 25
         private const val TAB_POLL_INTERVAL_MS = 100L

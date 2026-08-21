@@ -34,7 +34,7 @@ class DshBridgeOverlayTest {
 
     @Test
     fun `the overlay inserts a row rather than overriding one`() {
-        val yaml = bridge.overlayYaml("http://127.0.0.1:7677/mcp")
+        val yaml = bridge.overlayYaml("boss", "http://127.0.0.1:7677/mcp")
 
         assertTrue(
             yaml.lineSequence().any { it.trimEnd() == "- insert:" },
@@ -46,28 +46,40 @@ class DshBridgeOverlayTest {
 
     @Test
     fun `the overlay names the streamable-http transport and the url`() {
-        val yaml = bridge.overlayYaml("http://127.0.0.1:9999/mcp")
+        val yaml = bridge.overlayYaml("boss", "http://127.0.0.1:9999/mcp")
 
         assertTrue(yaml.contains("transport: streamable-http"))
         assertTrue(yaml.contains("url: http://127.0.0.1:9999/mcp"))
-        assertTrue(yaml.contains("serverName: ${DshMcpBridge.SERVER_NAME}"))
+        assertTrue(yaml.contains("serverName: boss"))
     }
 
     @Test
-    fun `the server name fixes the tool prefix agents already use`() {
-        // Harness tools arrive as mcp__<serverName>__<tool>. Naming the server
-        // anything else would mean a BOSS skill or prompt that says
-        // mcp__boss__git_status is wrong on the harness side only.
-        assertEquals("boss", DshMcpBridge.SERVER_NAME)
+    fun `the server name is whatever the host reports, not a constant`() {
+        // The same server answers to `boss` inside BOSS and `bossterm` in a
+        // standalone BossTerm, and the model-facing tool prefix follows it - so a
+        // hardcoded name is wrong on one of the two hosts.
+        assertTrue(bridge.overlayYaml("boss", "http://127.0.0.1:7679/mcp").contains("serverName: boss"))
+        assertTrue(bridge.overlayYaml("bossterm", "http://127.0.0.1:7677/mcp").contains("serverName: bossterm"))
+        assertEquals("boss", DshMcpBridge.DEFAULT_SERVER_NAME, "the fallback stays `boss`")
         assertTrue(
-            DshMcpBridge.SERVER_NAME.matches(Regex("[A-Za-z0-9_-]{1,32}")),
+            DshMcpBridge.DEFAULT_SERVER_NAME.matches(Regex("[A-Za-z0-9_-]{1,32}")),
             "the harness constrains serverName to [A-Za-z0-9_-]{1,32}",
         )
     }
 
     @Test
+    fun `the overlay never hardcodes BossTerm's port`() {
+        // The bug this replaced: 7677 is BossTerm's MCP server, not BOSS's, so
+        // the bridge pointed at the wrong server and no BOSS tool ever arrived.
+        val yaml = bridge.overlayYaml("boss", "http://127.0.0.1:7679/mcp")
+
+        assertTrue(yaml.contains("url: http://127.0.0.1:7679/mcp"))
+        assertFalse(yaml.contains("7677"), "7677 is BossTerm's port:\n$yaml")
+    }
+
+    @Test
     fun `writeOverlay lands under the plugin's own directory, not a user file`() {
-        val written = bridge.writeOverlay("http://127.0.0.1:7677/mcp")
+        val written = bridge.writeOverlay("boss", "http://127.0.0.1:7677/mcp")
 
         assertTrue(written.isFile)
         assertEquals(DshPaths.overlayDir(env).absolutePath, written.parentFile.absolutePath)
@@ -87,7 +99,7 @@ class DshBridgeOverlayTest {
         val homeLayer = File(DshPaths.home(env), "cordis.patch.yml")
         homeLayer.writeText("[]\n")
 
-        bridge.writeOverlay("http://127.0.0.1:7677/mcp")
+        bridge.writeOverlay("boss", "http://127.0.0.1:7677/mcp")
 
         assertEquals(original, userLayer.readText(), "the profile's own patch layer must be untouched")
         assertEquals("[]\n", homeLayer.readText(), "the home patch layer must be untouched")
@@ -95,8 +107,8 @@ class DshBridgeOverlayTest {
 
     @Test
     fun `rewriting picks up a changed port`() {
-        bridge.writeOverlay("http://127.0.0.1:7677/mcp")
-        val second = bridge.writeOverlay("http://127.0.0.1:8888/mcp")
+        bridge.writeOverlay("boss", "http://127.0.0.1:7677/mcp")
+        val second = bridge.writeOverlay("boss", "http://127.0.0.1:8888/mcp")
 
         val text = second.readText()
         assertTrue(text.contains("8888"), "a re-enable must refresh the URL")
@@ -107,7 +119,7 @@ class DshBridgeOverlayTest {
     fun `removeOverlay succeeds whether or not the file is there`() {
         assertTrue(bridge.removeOverlay(), "absence is success — removal must be idempotent")
 
-        bridge.writeOverlay("http://127.0.0.1:7677/mcp")
+        bridge.writeOverlay("boss", "http://127.0.0.1:7677/mcp")
         assertTrue(bridge.overlayFile().isFile)
 
         assertTrue(bridge.removeOverlay())
@@ -118,7 +130,7 @@ class DshBridgeOverlayTest {
     fun `the overlay explains itself to whoever finds it`() {
         // Someone will find this file in their harness home with no idea what
         // wrote it. It has to say so, and say that deleting it is safe.
-        val yaml = bridge.overlayYaml("http://127.0.0.1:7677/mcp")
+        val yaml = bridge.overlayYaml("boss", "http://127.0.0.1:7677/mcp")
         assertTrue(yaml.contains("BOSS"), "must name what wrote it")
         assertTrue(yaml.contains("Safe to delete"), "must say deleting it is safe")
         // Matched as tokens, not as a sentence: the reason lives in a wrapped YAML
