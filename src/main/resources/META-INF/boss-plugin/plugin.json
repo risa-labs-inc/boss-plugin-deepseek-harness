@@ -21,7 +21,7 @@
   "definedPermissions": [
     {
       "name": "dsh.run",
-      "description": "Let agents submit tasks to DeepSeek Harness. Each task spends model tokens and can read and write files in the workspace it runs against."
+      "description": "Let agents submit tasks to DeepSeek Harness. Each task spends model tokens, can read and write files in the workspace it runs against, and registers provider routes in the harness's own settings.yaml for the API keys BOSS is configured to pass it"
     },
     {
       "name": "dsh.manage",

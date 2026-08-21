@@ -269,7 +269,23 @@ class DshMcpToolProvider(
         lines += "profiles: " + engine.profiles.value
             .joinToString(", ") { "${it.name}${if (it.initialized) "" else " (not yet created)"}" }
             .ifBlank { "none" }
-        lines += "api key: ${engine.keySource.value.label()}"
+        // Both sides, because BOSS having no DeepSeek key says nothing about
+        // whether the harness can run: it may be fully configured with another
+        // provider through its own Models page. Reporting only the BOSS side
+        // read as "broken" while turns were succeeding.
+        lines += "harness:  " + (engine.secretSync.harnessDefaultModel() ?: "no provider selected in the harness")
+        lines += "boss key: ${engine.keySource.value.label()} (DeepSeek)"
+        val selection = engine.keySelection.value
+        val names = engine.keyCandidates.value.filter { selection.isOn(it) }.map { it.envName }.sorted()
+        lines += "injected: " + (names.joinToString(", ").ifBlank { "none" })
+        lines += "routes:   " + when (val r = engine.lastRegister.value) {
+            is DshRegisterOutcome.Added -> "added ${r.routes.joinToString(", ")}"
+            is DshRegisterOutcome.TooComplex -> "not written - ${r.reason}"
+            is DshRegisterOutcome.Failed -> "not written - ${r.reason}"
+            DshRegisterOutcome.UpToDate ->
+                engine.registrar.existingRoutes().filter { it in DshProviderRegistrar.VERIFIED_ROUTES }
+                    .sorted().joinToString(", ").ifBlank { "none registered" }
+        }
         lines += "server:  " + when (val s = engine.server.state.value) {
             is DshServer.Running -> "running on ${s.url}"
             is DshServer.Failed -> "stopped; last failure: ${s.reason}"

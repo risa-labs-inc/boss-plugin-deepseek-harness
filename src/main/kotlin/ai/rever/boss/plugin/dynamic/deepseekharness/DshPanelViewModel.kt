@@ -28,6 +28,8 @@ class DshPanelViewModel(private val services: DshServices) {
     val profiles: StateFlow<List<DshProfile>> = engine.profiles
     val keySource: StateFlow<DshKeySource> = engine.keySource
     val bridgeEnabled: StateFlow<Boolean> = engine.bridgeEnabled
+    val keyCandidates: StateFlow<List<DshKeyCandidate>> = engine.keyCandidates
+    val keySelection: StateFlow<DshKeySelection> = engine.keySelection
     val busy: StateFlow<String?> = engine.busy
 
     private val _expanded = MutableStateFlow(setOf(Section.STATUS, Section.SERVER))
@@ -100,6 +102,12 @@ class DshPanelViewModel(private val services: DshServices) {
         services.toastInfo(message)
     }
 
+    fun setKeySelected(candidate: DshKeyCandidate, selected: Boolean) {
+        services.setKeySelected(candidate, selected)
+        val verb = if (selected) "will be passed to" else "will no longer be passed to"
+        services.toastInfo("${candidate.envName} $verb DeepSeek Harness. Restart the server to apply.")
+    }
+
     fun copyUrl() {
         val running = server.value as? DshServer.Running ?: return
         services.context.clipboardProvider?.setText(running.url)
@@ -115,6 +123,7 @@ class DshPanelViewModel(private val services: DshServices) {
         STATUS("Status"),
         SERVER("Server"),
         PROFILES("Profiles"),
+        KEYS("Provider keys"),
         BRIDGE("BOSS MCP tools"),
     }
 }

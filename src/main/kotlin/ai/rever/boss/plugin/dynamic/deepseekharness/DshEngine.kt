@@ -19,6 +19,8 @@ class DshEngine(
 ) {
 
     val credentials = DshCredentials(context)
+    val secretSync = DshSecretSync(context, env)
+    val registrar = DshProviderRegistrar(env)
     val bridge = DshMcpBridge(env)
     val server = DshWebServer(env)
 
@@ -37,6 +39,17 @@ class DshEngine(
     private val _bridgeEnabled = MutableStateFlow(false)
     val bridgeEnabled: StateFlow<Boolean> = _bridgeEnabled.asStateFlow()
 
+    private val _keyCandidates = MutableStateFlow<List<DshKeyCandidate>>(emptyList())
+    val keyCandidates: StateFlow<List<DshKeyCandidate>> = _keyCandidates.asStateFlow()
+
+    private val _keySelection = MutableStateFlow(DshKeySelection())
+    val keySelection: StateFlow<DshKeySelection> = _keySelection.asStateFlow()
+
+    private val _lastRegister = MutableStateFlow<DshRegisterOutcome>(DshRegisterOutcome.UpToDate)
+
+    /** Outcome of the most recent provider registration, for the panel and doctor. */
+    val lastRegister: StateFlow<DshRegisterOutcome> = _lastRegister.asStateFlow()
+
     private val _busy = MutableStateFlow<String?>(null)
 
     /** Non-null while a long operation runs, carrying a label for the panel. */
@@ -52,6 +65,63 @@ class DshEngine(
         refreshInstall()
         refreshProfiles()
         refreshKeySource()
+        refreshKeyCandidates()
+    }
+
+    suspend fun refreshKeyCandidates() {
+        _keyCandidates.value = secretSync.candidates()
+    }
+
+    /** Restored from plugin storage at start; see DshServices. */
+    fun setKeySelection(selection: DshKeySelection) {
+        _keySelection.value = selection
+    }
+
+    /**
+     * Register a harness route for every key being injected that maps to one.
+     *
+     * Run before each launch rather than once, because the set of injected keys
+     * changes when the user ticks a switch or adds a secret, and a route is only
+     * ever written when its credential will actually be present - the harness
+     * fails a route whose `apiKeyEnv` resolves to nothing rather than falling
+     * through to another. Idempotent, so the common case touches no file.
+     */
+    suspend fun syncProviders(): DshRegisterOutcome {
+        val names = secretSync.namesFor(_keySelection.value, credentials.suppliedNames())
+        val outcome = registrar.register(registrar.plan(names))
+        _lastRegister.value = outcome
+        return outcome
+    }
+
+    /**
+     * The complete environment handed to a harness child: the DeepSeek provider
+     * key (or its removal) plus every secret the user ticked.
+     *
+     * Assembled in one place so the server and the one-shot `ask` path cannot
+     * drift - a key that worked in the web UI but not in dsh_ask would be a
+     * miserable thing to debug.
+     */
+    /**
+     * A trailing note when provider registration declined, and nothing otherwise.
+     *
+     * Both launch paths used to discard the outcome, so a refusal was only visible
+     * to someone who thought to run `dsh_doctor` - the reported symptom would be
+     * "I turned the key on and nothing happened".
+     */
+    private fun registerNote(): String = when (val r = _lastRegister.value) {
+        is DshRegisterOutcome.TooComplex ->
+            "\n\nNote: provider routes were not registered - ${r.reason}. Add this to " +
+                "$home/settings.yaml under `llm-pi-ai:` yourself:\n\n${r.manualYaml}"
+        is DshRegisterOutcome.Failed -> "\n\nNote: provider routes were not registered - ${r.reason}"
+        else -> ""
+    }
+
+    private suspend fun childEnv(): Map<String, String?> {
+        val provider = credentials.childEnv()
+        // Only names that actually resolved are "supplied"; a name mapped to null
+        // is a removal, and a ticked secret must be allowed to fill it.
+        val supplied = provider.filterValues { it != null }.keys
+        return provider + secretSync.envFor(_keySelection.value, supplied)
     }
 
     suspend fun refreshInstall() {
@@ -111,10 +181,11 @@ class DshEngine(
         val ready = _install.value as? DshInstall.Ready
             ?: return "DeepSeek Harness is not installed. Open the DeepSeek Harness panel to install it."
         val overlay = if (_bridgeEnabled.value) bridge.overlayFile().takeIf { it.isFile } else null
+        syncProviders()
         _busy.value = "Starting dsh web"
         return try {
-            when (val outcome = server.start(ready.dsh, workspaceRoot(), credentials.childEnv(), overlay)) {
-                is DshServer.Running -> "dsh web is serving ${outcome.url} (pid ${outcome.pid})."
+            when (val outcome = server.start(ready.dsh, workspaceRoot(), childEnv(), overlay)) {
+                is DshServer.Running -> "dsh web is serving ${outcome.url} (pid ${outcome.pid})." + registerNote()
                 is DshServer.Failed -> "dsh web did not start: ${outcome.reason}"
                 else -> "dsh web is ${outcome::class.simpleName}."
             }
@@ -142,16 +213,18 @@ class DshEngine(
             ?: return "DeepSeek Harness is not installed on this machine." to true
 
         if (task.isBlank()) return "A task is required." to true
+        syncProviders()
 
         val exec = DshCli.exec(
             argv = listOf(ready.dsh.absolutePath, "--profile", "headless", task),
             cwd = cwd,
-            extraEnv = credentials.childEnv(),
+            extraEnv = childEnv(),
             timeoutSeconds = timeoutSeconds,
         )
 
         return when {
-            exec.ok -> exec.stdout.trim().ifBlank { "(the harness completed the turn with no text)" } to false
+            exec.ok -> (exec.stdout.trim().ifBlank { "(the harness completed the turn with no text)" } +
+                registerNote()) to false
             exec.timedOut -> "The task exceeded ${timeoutSeconds}s and was stopped." to true
             exec.missing -> "DeepSeek Harness could not be started." to true
             exec.message.contains(DshCredentials.MISSING_MARKER) ->
