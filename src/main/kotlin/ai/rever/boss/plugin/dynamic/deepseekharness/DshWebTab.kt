@@ -3,14 +3,12 @@ package ai.rever.boss.plugin.dynamic.deepseekharness
 import ai.rever.boss.plugin.api.TabInfo
 import ai.rever.boss.plugin.api.TabTypeId
 import ai.rever.boss.plugin.api.TabTypeInfo
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.ui.graphics.vector.ImageVector
 
 object DshWebTabType : TabTypeInfo {
     override val typeId = TabTypeId("deepseek-harness-web", DshServices.PLUGIN_ID)
     override val displayName = "DeepSeek Harness"
-    override val icon: ImageVector = Icons.Outlined.AutoAwesome
+    override val icon: ImageVector = DeepSeekIcon
 }
 
 /**
@@ -26,7 +24,7 @@ data class DshWebTabInfo(
     override val id: String = TAB_ID,
     override val typeId: TabTypeId = DshWebTabType.typeId,
     override val title: String = "DeepSeek Harness",
-    override val icon: ImageVector = Icons.Outlined.AutoAwesome,
+    override val icon: ImageVector = DeepSeekIcon,
 ) : TabInfo {
     companion object {
         const val TAB_ID = "deepseek-harness-web"
