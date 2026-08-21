@@ -144,7 +144,7 @@ filter when answering a question about one setting.
 ## Testing
 
 ```bash
-./gradlew build   # 49 tests
+./gradlew build   # 54 tests
 ```
 
 Count results from `build/test-results/test/*.xml`, not from "BUILD SUCCESSFUL" -
