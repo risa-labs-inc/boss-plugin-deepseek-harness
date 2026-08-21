@@ -258,11 +258,16 @@ class DshMcpToolProvider(
         val lines = mutableListOf<String>()
         lines += when (install) {
             DshInstall.NodeMissing ->
-                "node:    ABSENT - install Node 22.19+ or 24+, then install the harness"
+                "node:    ABSENT - install Node ${DshNode.MIN_LABEL}+ or 24+, then install the harness"
+            is DshInstall.NodeTooOld ->
+                "node:    newest found is ${install.version} at ${install.node.absolutePath} - " +
+                    "TOO OLD, the harness needs ${DshNode.MIN_LABEL}+\n" +
+                    "dsh:     cannot be installed until a newer Node is present"
             is DshInstall.DshMissing ->
                 "node:    ${install.node.absolutePath}\ndsh:     ABSENT - run `${engine.installCommand()}`"
             is DshInstall.Ready ->
-                "node:    present\ndsh:     ${install.dsh.absolutePath} (${install.version})"
+                "node:    ${DshCli.which("node")?.absolutePath ?: "present"}\n" +
+                    "dsh:     ${install.dsh.absolutePath} (${install.version}, pinned ${DshCli.PINNED_VERSION})"
         }
         lines += "pnpm:    " + (engine.pnpm.value?.absolutePath ?: "ABSENT - needed only for bundle management")
         lines += "home:    ${engine.home.absolutePath}"

@@ -66,6 +66,26 @@ object DshCli {
     const val PACKAGE = "@deepseek-ai/dsh"
 
     /**
+     * The harness release this plugin installs and is tested against.
+     *
+     * Pinned, not `@latest`. Every fact in AGENTS.md under "Verified facts about
+     * the harness" was probed against a specific release — the stdout shape of
+     * `dsh web`, the `MISSING_CREDENTIAL` text, which profiles self-initialize,
+     * the patch-layer YAML form, the set of provider routes pi-ai actually ships.
+     * With `@latest` those facts describe whatever npm served the day a given
+     * user clicked Install, so two people running "the same plugin version" can
+     * have different harnesses and only one of them matches the code.
+     *
+     * Bumped by `.github/workflows/harness-bump.yml`, which installs the
+     * candidate and runs it before opening the PR, so moving forward stays a
+     * decision with evidence rather than a side effect of the clock.
+     */
+    const val PINNED_VERSION = "0.1.0-rc.7"
+
+    /** What to hand npm: the pinned package spec. */
+    const val PINNED_SPEC = "$PACKAGE@$PINNED_VERSION"
+
+    /**
      * Directories searched beyond PATH, and prepended to the child's PATH.
      *
      * Ordered most-specific first. The npm/volta/asdf shim directories come
@@ -94,21 +114,64 @@ object DshCli {
      * `File.canExecute()` calls, so the cost of asking again is not worth a
      * cache-invalidation bug.
      */
-    fun which(name: String): File? {
+    fun which(name: String): File? = whichAll(name).firstOrNull()
+
+    /**
+     * Every [name] we can find, most-preferred first, deduplicated.
+     *
+     * [which] answers "where is it", which is the wrong question for a binary
+     * with a minimum version — see [DshNodeResolver]. Deduplicated by canonical
+     * path because the same Node is routinely reachable twice (a shim directory
+     * and the real install, or a symlinked `/usr/local/bin`), and probing it
+     * twice would just be slower.
+     */
+    fun whichAll(name: String): List<File> {
         val fromPath = System.getenv("PATH").orEmpty()
             .split(File.pathSeparatorChar)
             .filter { it.isNotBlank() }
-        for (dir in fromPath + extraDirs) {
+        val seen = LinkedHashMap<String, File>()
+        for (dir in preferredDirs + fromPath + extraDirs) {
             val candidate = File(dir, name)
-            if (candidate.isFile && candidate.canExecute()) return candidate
+            if (!candidate.isFile || !candidate.canExecute()) continue
+            val key = runCatching { candidate.canonicalPath }.getOrDefault(candidate.absolutePath)
+            seen.putIfAbsent(key, candidate)
         }
-        return null
+        return seen.values.toList()
     }
 
-    /** PATH handed to children: our search directories, then whatever we inherited. */
-    private fun childPath(): String {
+    /**
+     * Directories to put ahead of everything else, set once the engine knows
+     * which Node it settled on and where the plugin installed the harness.
+     *
+     * This exists because the *decision* is made in one place (a suspending
+     * resolve that probes each candidate) and *used* in several that cannot make
+     * it themselves — `DshWebServer` spawns `dsh web` long after, on a thread
+     * with no access to the engine. Threading a parameter through every spawn
+     * would have the same effect with more places to forget.
+     *
+     * Empty until the first `refreshInstall`, which degrades to exactly the old
+     * behaviour rather than to something new and untested.
+     */
+    @Volatile
+    private var preferredDirs: List<String> = emptyList()
+
+    /** Record the resolved toolchain. Later spawns lead their PATH with it. */
+    fun preferDirs(dirs: List<File>) {
+        preferredDirs = dirs.map { it.absolutePath }.distinct()
+    }
+
+    /**
+     * PATH handed to children: the resolved toolchain, our search directories,
+     * then whatever we inherited.
+     *
+     * Public and shared because `DshWebServer` had grown a second copy of this
+     * with a *different* directory list, so a spawn through one path and a spawn
+     * through the other could disagree about which Node ran the harness — which
+     * is precisely the class of bug this whole change is about.
+     */
+    fun childPath(): String {
         val inherited = System.getenv("PATH").orEmpty()
-        val prefix = extraDirs.joinToString(File.pathSeparator)
+        val prefix = (preferredDirs + extraDirs).distinct().joinToString(File.pathSeparator)
         return if (inherited.isBlank()) prefix else "$prefix${File.pathSeparator}$inherited"
     }
 

@@ -22,7 +22,8 @@ DshWebServer       spawn / await / reap `dsh web`
 DshCredentials     DEEPSEEK_API_KEY from BOSS -> child env
 DshMcpBridge       the opt-in cordis patch overlay
 DshMcpTools        the dsh_* tools
-DshPaths           $DSH_HOME resolution (pure - creates nothing)
+DshPaths           $DSH_HOME + the plugin's own npm prefix (pure - creates nothing)
+DshNodeResolver    which of the machine's `node` binaries the harness runs on
 DshIcon            the DeepSeek whale, shared by the panel and the tab
 DshSecretSync      which BOSS secrets to inject, and the defaults
 DshProviderRegistrar  writes provider routes into the harness's settings.yaml
@@ -69,6 +70,44 @@ of these after a harness upgrade.
   `/opt/homebrew/bin/dsh` and a bare `"dsh"` fails in the shipped app while
   working in dev. Everything goes through `DshCli.which` and gets a widened child
   PATH.
+- **`which` is the wrong question for `node`.** A machine has several, and the
+  harness has a *minimum version*. First-match-on-PATH picked an nvm 18.16.0 that
+  was shadowing a Homebrew 26.7.0 on the reporting machine - the install then died
+  in a postinstall on `import.meta.resolve is not a function`, and the first fix
+  for that told the user to upgrade a Node they already had. `DshNodeResolver`
+  probes every candidate from `DshCli.whichAll("node")`; `DshInstall.NodeTooOld`
+  means *none* qualified, which is the only case where "upgrade Node" is honest.
+- **The Node floor is fail-open.** An unreadable `node --version` is a reason to
+  stay out of the way, not to disable a machine - a false `NodeTooOld` hides a
+  working setup behind a wrong error, which is worse than the npm failure the
+  floor exists to pre-empt. `DshNode.parse` returns null and the resolver ranks
+  unreadable below known-good but above known-too-old.
+- **Never `npm install -g` without `--prefix`.** The harness goes into
+  `DshPaths.toolchainDir` ($DSH_HOME/boss-toolchain), which the plugin owns. A
+  real global install lands in whichever Node's prefix is selected - so it
+  vanishes when the user switches Node, may need sudo, and cannot be removed with
+  the plugin.
+- **npm's prefix layout differs on Windows.** `--prefix <dir>` links
+  `<dir>/bin/dsh` on Unix but shims `<dir>\dsh.cmd` in the prefix *root*, with no
+  `bin` at all. `DshPaths.toolchainExecDirs` returns both and everything searches
+  both; looking only in `bin` installs fine on Windows and then reports the
+  harness missing.
+- **An install in a terminal reports nothing back.** `DshEngine.awaitInstalled`
+  watches the prefix for `bin/dsh` and only then re-probes; without it the panel
+  sat on "not installed" until the user pressed Refresh. It must re-probe rather
+  than latch on the file: npm links `bin/` before postinstalls finish, so the
+  binary exists for a few seconds before it will answer `--version`.
+- **The harness version is pinned, not `@latest`.** Everything under "Verified
+  facts" was probed against one release, so `@latest` means those facts describe
+  whatever npm served that day. `DshCli.PINNED_VERSION` is moved by
+  `.github/workflows/harness-bump.yml`, which installs the candidate on all three
+  OSes at the declared Node floor and proves the binary runs before opening a PR.
+  A green run there means it installs - not that the probed behaviour still holds,
+  which is why the PR body carries a re-probe checklist.
+- **One child PATH, not two.** `DshWebServer` used to build its own, missing the
+  toolchain-manager directories and later the resolved Node, so `dsh --version`
+  could be probed with one Node and `dsh web` spawned with another. Both go
+  through `DshCli.childPath()` now.
 - **Never a shell string.** Task text comes from a model. `DshCli.exec` takes a
   `List<String>` so there is no shell to inject into. `DshCliTest` pins this with
   a hostile task.
@@ -253,7 +292,7 @@ filter when answering a question about one setting.
 ## Testing
 
 ```bash
-./gradlew build   # 103 tests
+./gradlew build   # 151 tests
 ```
 
 Count results from `build/test-results/test/*.xml`, not from "BUILD SUCCESSFUL" -
@@ -264,6 +303,12 @@ Both central guards have been shown to fail against a real mutation:
 - dropping `dsh_ask`'s permission fails 2 tests in `DshMcpToolRbacTest`
 - switching the overlay to the bare-id override form fails
   `DshBridgeOverlayTest`
+- reverting `DshNodeResolver` to first-match fails 6 of 10 in
+  `DshNodeResolverTest`
+- pointing the Install button back at `setPendingSidebarCommand` fails
+  `DshInstallTerminalTest`
+- latching `awaitInstalled` on the binary appearing, without re-probing, fails 2
+  in `DshAwaitInstalledTest`
 
 Do that again for any new guard. Two regression tests in this workspace's history
 passed against their own bug.

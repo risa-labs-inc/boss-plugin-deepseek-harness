@@ -199,8 +199,21 @@ private fun StatusBody(install: DshInstall, keySource: DshKeySource, viewModel: 
             DshInstall.NodeMissing -> {
                 Field("Node", "not found")
                 Note(
-                    "DeepSeek Harness runs on Node. Install Node 22.19 or newer, then come back " +
+                    "DeepSeek Harness runs on Node. Install Node ${DshNode.MIN_LABEL} or newer, then come back " +
                         "and install the harness here.",
+                )
+            }
+
+            // Deliberately no Install button: on this Node the install cannot
+            // succeed, and offering it is the bug this state was added to fix.
+            is DshInstall.NodeTooOld -> {
+                Field("Node", "${install.version} — too old")
+                Field("Harness", "not installed")
+                Note(
+                    "DeepSeek Harness needs Node ${DshNode.MIN_LABEL} or newer. The newest on this " +
+                        "machine is ${install.version}, at ${install.node.absolutePath}. Install a " +
+                        "newer Node and come back — it does not have to be your default, anything " +
+                        "on PATH or in the usual install directories is found automatically.",
                 )
             }
 

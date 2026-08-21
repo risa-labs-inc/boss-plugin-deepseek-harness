@@ -4,6 +4,7 @@ import ai.rever.boss.plugin.api.McpServerController
 import ai.rever.boss.plugin.api.NotificationType
 import ai.rever.boss.plugin.api.PluginContext
 import ai.rever.boss.plugin.api.PluginStorageProvider
+import ai.rever.boss.plugin.tab.terminal.TerminalTabInfo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -153,6 +154,48 @@ class DshServices(val context: PluginContext) {
         return false
     }
 
+    /**
+     * Open, or focus, the main-panel terminal tab the install runs in.
+     *
+     * The install is minutes long, so it belongs somewhere its output is visible
+     * rather than behind a spinner indistinguishable from a hang — which is what
+     * the panel's own copy has always promised ("runs in a terminal tab").
+     *
+     * The tab id is fixed rather than minted per click, so a second click focuses
+     * the run already in flight instead of starting a second `npm install -g`
+     * against the same global prefix.
+     *
+     * Same fire-and-forget caveat as [openWebTab]: `openTab` silently drops the
+     * tab when nothing has registered a factory for its type, which here means the
+     * terminal-tab plugin is not loaded. Confirm before claiming anything opened.
+     */
+    suspend fun openInstallTerminal(command: String): Boolean {
+        val tabs = context.activeTabsProvider
+        tabs?.activeTabs?.value?.firstOrNull { it.tabId == INSTALL_TAB_ID }?.let { existing ->
+            tabs.selectTab(existing.tabId, existing.panelId)
+            return true
+        }
+        val ops = context.splitViewOperations ?: run {
+            toastError("This host exposes no split-view operations, so the install terminal cannot be opened")
+            return false
+        }
+        ops.openTab(
+            TerminalTabInfo(
+                id = INSTALL_TAB_ID,
+                title = "Install DeepSeek Harness",
+                initialCommand = command,
+            ),
+        )
+
+        // Nothing to verify against; report the request as made.
+        if (tabs == null) return true
+        repeat(TAB_POLL_ATTEMPTS) {
+            delay(TAB_POLL_INTERVAL_MS)
+            if (tabs.activeTabs.value.any { it.tabId == INSTALL_TAB_ID }) return true
+        }
+        return false
+    }
+
     /** Open [url] in a host browser tab — the fallback when embedding is unavailable. */
     fun openUrl(url: String, title: String) {
         val ops = context.splitViewOperations ?: run {
@@ -190,6 +233,10 @@ class DshServices(val context: PluginContext) {
         /** Tolerates the empty string and stray separators from an older write. */
         internal fun decodeIds(raw: String): Set<String> =
             raw.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+
+        /** Fixed so repeat clicks focus the running install instead of starting another. */
+        const val INSTALL_TAB_ID = "deepseek-harness-install"
+
 
         private const val TAB_POLL_ATTEMPTS = 25
         private const val TAB_POLL_INTERVAL_MS = 100L
