@@ -75,26 +75,47 @@ class DshPanelViewModel(private val services: DshServices) {
     }
 
     /**
-     * Install the harness in a visible terminal tab.
+     * Install the harness in a visible main-panel terminal tab.
      *
      * The install is minutes long — measured at over five minutes for a cold
      * dependency tree — so it runs where its output is visible rather than behind
-     * a spinner that is indistinguishable from a hang. The terminal is the host's
-     * to provide; without it the command is copied out for the user to run.
+     * a spinner that is indistinguishable from a hang.
+     *
+     * This used to hand the command to `TerminalTabPluginAPI.setPendingSidebarCommand`,
+     * which was wrong twice over. It queued the command for the *sidebar* terminal,
+     * so nothing opened and nothing ran until the user happened to open that sidebar
+     * — while the button's own note said "runs in a terminal tab". And it reached
+     * across into another plugin's API implementation, where a self-recursive
+     * delegate turned the click into a `StackOverflowError` that took the whole host
+     * down with it. Opening a tab through the host's own [SplitViewOperations] is
+     * both what the copy promised and one less plugin to trust.
+     *
+     * The terminal is still the host's to provide; without it the command is copied
+     * out for the user to run.
      */
     fun install() {
         val command = engine.installCommand()
-        val terminal = runCatching {
-            services.context.getPluginAPI(ai.rever.boss.plugin.api.TerminalTabPluginAPI::class.java)
-        }.getOrNull()
-        val windowId = services.context.windowId
-        if (terminal == null || windowId == null) {
-            services.context.clipboardProvider?.setText(command)
-            services.toastInfo("Install command copied. Run it in a terminal: $command")
-            return
+        scope.launch {
+            val opened = runCatching { services.openInstallTerminal(command) }.getOrDefault(false)
+            if (!opened) {
+                services.context.clipboardProvider?.setText(command)
+                services.toastInfo("Install command copied. Run it in a terminal: $command")
+                return@launch
+            }
+            services.toastInfo("Installing DeepSeek Harness in a terminal - this takes a few minutes")
+
+            // Then watch for it to land. The install runs in a terminal, so
+            // nothing reports back when it finishes: the panel used to sit on
+            // "not installed" until the user pressed Refresh, which makes the
+            // Install button look like it did nothing.
+            if (engine.awaitInstalled()) {
+                services.toastSuccess("DeepSeek Harness installed")
+            }
+            // No toast on timeout. It means the install is still running, was
+            // cancelled, or failed in a terminal the user is already looking at
+            // — none of which is improved by a popup contradicting the output
+            // on their screen.
         }
-        terminal.setPendingSidebarCommand(windowId, command, workingDirectory = null)
-        services.toastInfo("Installing DeepSeek Harness in a terminal - this takes a few minutes")
     }
 
     fun setBridgeEnabled(enabled: Boolean) {

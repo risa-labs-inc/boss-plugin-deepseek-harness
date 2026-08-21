@@ -215,12 +215,16 @@ class DshWebServer(
         pidFile.writeText(pid.toString())
     }
 
-    private fun childPathForSpawn(): String {
-        val inherited = System.getenv("PATH").orEmpty()
-        val extras = listOf("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin")
-            .joinToString(File.pathSeparator)
-        return if (inherited.isBlank()) extras else "$extras${File.pathSeparator}$inherited"
-    }
+    /**
+     * Delegated to [DshCli.childPath] rather than built here.
+     *
+     * This used to be its own list — homebrew, /usr/local, /usr/bin, /bin — which
+     * was DshCli's list minus the toolchain-manager directories and, once the
+     * plugin started choosing a Node by version, minus the chosen Node too. Two
+     * copies of "where do we find things" meant `dsh --version` could be probed
+     * with one Node and `dsh web` spawned with another.
+     */
+    private fun childPathForSpawn(): String = DshCli.childPath()
 
     /** Keep the tail: a stack trace's useful part is at the end, not the start. */
     private fun failureText(transcript: String): String =

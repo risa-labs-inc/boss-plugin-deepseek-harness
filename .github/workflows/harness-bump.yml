@@ -1,0 +1,203 @@
+name: Harness pin
+
+# Keeps DshCli.PINNED_VERSION current *with evidence*.
+#
+# The plugin used to install `@deepseek-ai/dsh@latest`, so the harness a user got
+# had no fixed relationship to the plugin version that was tested against it. Every
+# fact in AGENTS.md under "Verified facts about the harness" — the stdout shape of
+# `dsh web`, the MISSING_CREDENTIAL text, which profiles self-initialize, the
+# patch-layer YAML form, the provider routes pi-ai ships — was probed against one
+# release. `@latest` silently walks off all of them.
+#
+# So the pin is a constant in the source, and this workflow is what moves it:
+# install the candidate on every OS we ship to, on the oldest Node we claim to
+# support, prove the binary runs, and only then open a PR. A red run here means the
+# pin stays where it is, which is the safe outcome.
+#
+# The scheduled run also re-verifies the CURRENT pin, which catches a version being
+# unpublished or yanked out from under us — that would break installs for every
+# user with no commit on our side to blame.
+
+on:
+  schedule:
+    # 06:17 on Mondays. Off the hour on purpose: scheduled jobs on the hour queue
+    # behind everybody else's cron and start late anyway.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Harness version to verify and pin (default: whatever npm calls latest)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  PACKAGE: '@deepseek-ai/dsh'
+  PIN_FILE: src/main/kotlin/ai/rever/boss/plugin/dynamic/deepseekharness/DshCli.kt
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      current: ${{ steps.pin.outputs.current }}
+      candidate: ${{ steps.pin.outputs.candidate }}
+      changed: ${{ steps.pin.outputs.changed }}
+      floor: ${{ steps.pin.outputs.floor }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: pin
+        name: Read the pin and the floor, resolve the candidate
+        run: |
+          set -euo pipefail
+
+          # Parsed out of the source rather than duplicated into a file the
+          # constant could drift from. If either grep stops matching, fail loudly
+          # instead of bumping to an empty string.
+          CURRENT=$(grep -oE 'PINNED_VERSION = "[^"]+"' "$PIN_FILE" | head -1 | cut -d'"' -f2)
+          FLOOR=$(grep -oE 'MIN_VERSION = Semver\([0-9]+, [0-9]+, [0-9]+\)' \
+                    src/main/kotlin/ai/rever/boss/plugin/dynamic/deepseekharness/DshModels.kt \
+                  | head -1 | grep -oE '[0-9]+, [0-9]+, [0-9]+' | tr -d ' ' | tr ',' '.')
+          [ -n "$CURRENT" ] || { echo "::error::could not read PINNED_VERSION from $PIN_FILE"; exit 1; }
+          [ -n "$FLOOR" ]   || { echo "::error::could not read MIN_VERSION from DshModels.kt"; exit 1; }
+
+          CANDIDATE='${{ inputs.version }}'
+          if [ -z "$CANDIDATE" ]; then
+            CANDIDATE=$(npm view "$PACKAGE" version)
+          fi
+
+          echo "current=$CURRENT"     >> "$GITHUB_OUTPUT"
+          echo "candidate=$CANDIDATE" >> "$GITHUB_OUTPUT"
+          echo "floor=$FLOOR"         >> "$GITHUB_OUTPUT"
+          if [ "$CURRENT" = "$CANDIDATE" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "### Harness pin"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| pinned | \`$CURRENT\` |"
+            echo "| candidate | \`$CANDIDATE\` |"
+            echo "| node floor | \`$FLOOR\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Install the candidate for real. Every OS the host ships on, on the OLDEST Node
+  # the plugin claims to support — testing on the newest would pass while the floor
+  # we advertise was quietly wrong, which is the whole failure this guards.
+  verify:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.resolve.outputs.floor }}
+
+      - name: The harness must still accept our declared Node floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          REQUIRED=$(npm view "$PACKAGE@${{ needs.resolve.outputs.candidate }}" engines.node 2>/dev/null || true)
+          echo "declared engines.node: ${REQUIRED:-<none>}"
+          # Advisory: the binding check is whether it installs and runs below.
+          # A raised requirement shows up here first, with a name to grep for.
+          if [ -n "$REQUIRED" ]; then
+            echo "::notice::$PACKAGE declares engines.node '$REQUIRED'; DshNode.MIN_VERSION is ${{ needs.resolve.outputs.floor }}"
+          fi
+
+      - name: Install into a private prefix, exactly as the plugin does
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g --prefix "$PWD/toolchain" "$PACKAGE@${{ needs.resolve.outputs.candidate }}"
+
+      # npm shims to <prefix>/bin/dsh on Unix and <prefix>\dsh.cmd on Windows.
+      # DshPaths.installedDsh looks in both; so does this, and for the same reason.
+      - name: The installed binary must run and report the version we asked for
+        shell: bash
+        run: |
+          set -euo pipefail
+          for candidate in toolchain/bin/dsh toolchain/dsh.cmd toolchain/dsh; do
+            if [ -x "$candidate" ]; then DSH="$candidate"; break; fi
+          done
+          [ -n "${DSH:-}" ] || { echo "::error::no dsh executable under the prefix"; ls -R toolchain; exit 1; }
+
+          REPORTED=$("$DSH" --version)
+          echo "$DSH --version -> $REPORTED"
+          [ "$REPORTED" = "${{ needs.resolve.outputs.candidate }}" ] || {
+            echo "::error::asked for ${{ needs.resolve.outputs.candidate }}, got $REPORTED"; exit 1; }
+
+  bump:
+    needs: [resolve, verify]
+    if: needs.resolve.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Fetch the boss-plugin-api jar
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p build/downloaded-deps
+          API_VERSION=$(gh api repos/risa-labs-inc/boss-plugin-api/releases/latest --jq '.tag_name' | sed 's/^v//')
+          curl -fsSL -o build/downloaded-deps/boss-plugin-api.jar \
+            "https://github.com/risa-labs-inc/boss-plugin-api/releases/download/v${API_VERSION}/boss-plugin-api-${API_VERSION}.jar"
+
+      - name: Move the pin
+        run: |
+          set -euo pipefail
+          sed -i 's/PINNED_VERSION = "${{ needs.resolve.outputs.current }}"/PINNED_VERSION = "${{ needs.resolve.outputs.candidate }}"/' "$PIN_FILE"
+          git diff --stat -- "$PIN_FILE"
+          grep -q 'PINNED_VERSION = "${{ needs.resolve.outputs.candidate }}"' "$PIN_FILE" \
+            || { echo "::error::the pin did not move — the constant's shape must have changed"; exit 1; }
+
+      - name: Tests must still pass on the new pin
+        run: ./gradlew test --no-daemon
+        env:
+          CI: 'true'
+
+      - uses: peter-evans/create-pull-request@v6
+        with:
+          branch: harness-pin/${{ needs.resolve.outputs.candidate }}
+          title: 'Pin DeepSeek Harness ${{ needs.resolve.outputs.candidate }}'
+          commit-message: 'Pin harness ${{ needs.resolve.outputs.candidate }}'
+          body: |
+            Moves `DshCli.PINNED_VERSION` from `${{ needs.resolve.outputs.current }}`
+            to `${{ needs.resolve.outputs.candidate }}`.
+
+            Verified before this PR was opened: installed into a private prefix on
+            ubuntu, macOS and Windows, on Node `${{ needs.resolve.outputs.floor }}`
+            (the floor `DshNode.MIN_VERSION` declares), and the installed binary
+            reported the expected version on all three.
+
+            **What CI could not check.** Everything in AGENTS.md under "Verified
+            facts about the harness" was probed by hand against a specific release,
+            and this bump invalidates that provenance. Before merging, re-probe at
+            least:
+
+            - [ ] `dsh web` still prints one `dsh web: http://127.0.0.1:PORT` line
+            - [ ] `MISSING_CREDENTIAL` still appears in the no-key failure text
+            - [ ] `web` and `headless` still self-initialize with no pnpm
+            - [ ] a patch layer is still a top-level array (`- insert:`)
+            - [ ] the provider routes in `DshProviderRegistrar.VERIFIED_ROUTES`
+                  still resolve, and the ones in `KNOWN_ABSENT_ROUTES` still do not
+
+            A green run here means it installs and runs. It does not mean the
+            plugin's assumptions about its behaviour still hold.

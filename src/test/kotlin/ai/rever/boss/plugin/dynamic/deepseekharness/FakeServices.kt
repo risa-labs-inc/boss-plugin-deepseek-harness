@@ -19,24 +19,57 @@ import java.lang.reflect.Proxy
  */
 object FakeServices {
 
-    fun context(): PluginContext = stub(PluginContext::class.java) as PluginContext
+    fun context(): PluginContext = context(emptyMap())
+
+    /**
+     * The same all-null context, except that [overrides] answers for the JVM method
+     * names it names — `"getSplitViewOperations"` for the `splitViewOperations`
+     * property, and so on.
+     *
+     * Keyed by method name rather than by property so a test can stub a plain
+     * function too, and so nothing here has to know which Kotlin members exist.
+     */
+    fun context(overrides: Map<String, Any?>): PluginContext =
+        stub(PluginContext::class.java, overrides) as PluginContext
 
     fun services(): DshServices = DshServices(context())
 
-    private fun stub(iface: Class<*>): Any =
+    /**
+     * A stub of [iface] that records every call to [recorded], for tests that need
+     * to assert the plugin asked the host for something rather than just that it
+     * survived the host saying no.
+     */
+    fun recording(iface: Class<*>, recorded: MutableList<Pair<String, List<Any?>>>): Any =
         Proxy.newProxyInstance(iface.classLoader, arrayOf(iface)) { proxy, method, args ->
-            // Object's own methods reach the handler too, and null is not a legal
-            // return for hashCode's primitive int.
-            when (method.name) {
-                "hashCode" -> System.identityHashCode(proxy)
-                "equals" -> proxy === args?.firstOrNull()
-                "toString" -> "${iface.simpleName}(stub)"
-                else -> when (method.returnType) {
-                    Boolean::class.javaPrimitiveType -> false
-                    Int::class.javaPrimitiveType -> 0
-                    Long::class.javaPrimitiveType -> 0L
-                    else -> null
-                }
-            }
+            objectMethod(proxy, iface, method, args)?.let { return@newProxyInstance it }
+            recorded += method.name to (args?.toList() ?: emptyList())
+            defaultFor(method.returnType)
+        }
+
+    private fun stub(iface: Class<*>, overrides: Map<String, Any?> = emptyMap()): Any =
+        Proxy.newProxyInstance(iface.classLoader, arrayOf(iface)) { proxy, method, args ->
+            objectMethod(proxy, iface, method, args)?.let { return@newProxyInstance it }
+            if (overrides.containsKey(method.name)) overrides[method.name] else defaultFor(method.returnType)
+        }
+
+    /**
+     * Object's own methods reach the handler too, and null is not a legal return
+     * for hashCode's primitive int. Returns null when [method] is not one of them,
+     * which is distinguishable from a stubbed null because these three never are.
+     */
+    private fun objectMethod(proxy: Any, iface: Class<*>, method: java.lang.reflect.Method, args: Array<out Any?>?): Any? =
+        when (method.name) {
+            "hashCode" -> System.identityHashCode(proxy)
+            "equals" -> proxy === args?.firstOrNull()
+            "toString" -> "${iface.simpleName}(stub)"
+            else -> null
+        }
+
+    private fun defaultFor(returnType: Class<*>): Any? =
+        when (returnType) {
+            Boolean::class.javaPrimitiveType -> false
+            Int::class.javaPrimitiveType -> 0
+            Long::class.javaPrimitiveType -> 0L
+            else -> null
         }
 }

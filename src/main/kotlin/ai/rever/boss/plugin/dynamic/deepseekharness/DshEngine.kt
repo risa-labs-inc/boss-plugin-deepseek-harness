@@ -1,6 +1,7 @@
 package ai.rever.boss.plugin.dynamic.deepseekharness
 
 import ai.rever.boss.plugin.api.PluginContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -150,13 +151,32 @@ class DshEngine(
     }
 
     suspend fun refreshInstall() {
-        val node = DshCli.which("node")
         _pnpm.value = DshCli.which("pnpm")
-        if (node == null) {
-            _install.value = DshInstall.NodeMissing
-            return
+
+        // Every node, not the first one. `which`-style first-match picks whatever
+        // leads PATH, which on the reporting machine was an nvm 18.16.0 shadowing
+        // a Homebrew 26.7.0 — so the install failed on a Node the user had
+        // already replaced twice over.
+        val node = when (val found = DshNodeResolver.resolve(DshCli.whichAll("node")) { nodeVersion(it) }) {
+            DshNodeResolver.Resolution.NoNode -> {
+                _install.value = DshInstall.NodeMissing
+                return
+            }
+
+            is DshNodeResolver.Resolution.AllTooOld -> {
+                _install.value = DshInstall.NodeTooOld(found.node, found.version.toString())
+                return
+            }
+
+            is DshNodeResolver.Resolution.Usable -> found.node
         }
-        val dsh = DshCli.which("dsh")
+
+        // Pin the choice for every later spawn, and put our own prefix ahead of
+        // PATH so the harness we installed wins over one the user installed
+        // globally — ours is the version this plugin was tested against.
+        DshCli.preferDirs(DshPaths.toolchainExecDirs(env) + listOfNotNull(node.parentFile))
+
+        val dsh = DshPaths.installedDsh(env) ?: DshCli.which("dsh")
         if (dsh == null) {
             _install.value = DshInstall.DshMissing(node)
             return
@@ -169,6 +189,59 @@ class DshEngine(
             // rather than Ready-with-a-bad-version: every later call would fail
             // the same way, and "install it" is the honest remedy.
             DshInstall.DshMissing(node)
+        }
+    }
+
+    /**
+     * `node --version`, or null when it cannot be read.
+     *
+     * Null on a failed or unparseable probe, and [refreshInstall] then carries on
+     * as though the version were fine — see [DshNode.parse] for why an unknown
+     * version must not become a blocking error.
+     */
+    private suspend fun nodeVersion(node: File): String? {
+        val probe = DshCli.exec(listOf(node.absolutePath, "--version"), timeoutSeconds = VERSION_TIMEOUT)
+        return if (probe.ok) probe.stdout else null
+    }
+
+    /**
+     * Wait for an install running in a terminal to land, then pick it up.
+     *
+     * The install runs where the user can watch it, which means nothing tells the
+     * plugin when it finished — the panel sat on "not installed" until someone
+     * thought to press Refresh, and a button whose effect only appears if you
+     * poke a *different* button reads as a button that did not work.
+     *
+     * Watching the filesystem rather than the terminal: the plugin owns the
+     * prefix now ([DshPaths.toolchainDir]), so `bin/dsh` appearing is a fact
+     * about the install and not a guess about a process it does not own. Reading
+     * the terminal's output would mean parsing npm's progress rendering, and
+     * would break the moment the user runs the command themselves instead.
+     *
+     * Only the *existence* check runs every tick. `dsh --version` is a process
+     * spawn, so it is attempted only once there is something to ask, and the loop
+     * keeps going if it fails — npm links `bin/` before the postinstall scripts
+     * finish, so the binary can exist for a few seconds before it will answer.
+     *
+     * Returns true once the harness reports [DshInstall.Ready], false on timeout.
+     * Cancellation is the panel closing, which [delay] already honours.
+     */
+    suspend fun awaitInstalled(
+        timeoutMs: Long = INSTALL_WATCH_TIMEOUT_MS,
+        intervalMs: Long = INSTALL_WATCH_INTERVAL_MS,
+    ): Boolean {
+        val startedAt = System.currentTimeMillis()
+        _busy.value = "Installing DeepSeek Harness"
+        try {
+            while (System.currentTimeMillis() - startedAt < timeoutMs) {
+                delay(intervalMs)
+                if (DshPaths.installedDsh(env) == null) continue
+                refreshInstall()
+                if (_install.value.ready) return true
+            }
+            return false
+        } finally {
+            _busy.value = null
         }
     }
 
@@ -377,7 +450,35 @@ class DshEngine(
     }
 
     /** Install command for the panel to run in a visible terminal. */
-    fun installCommand(): String = "npm install -g ${DshCli.PACKAGE}@latest"
+    /**
+     * The command the Install button runs in a terminal.
+     *
+     * Three deliberate differences from the `npm install -g <pkg>@latest` this
+     * replaced:
+     *
+     * - **`--prefix`**, so the harness lands in a directory this plugin owns
+     *   rather than in whichever Node's global prefix is selected. See
+     *   [DshPaths.toolchainDir].
+     * - **A pinned version**, so the harness matches the one the plugin's
+     *   behaviour was verified against. See [DshCli.PINNED_VERSION].
+     * - **PATH led by the resolved Node's directory**, so the install runs under
+     *   a Node that can actually complete it. Without this the command inherits
+     *   the terminal's PATH, which is the thing that was wrong in the first
+     *   place: the user's shell puts nvm first, and npm would build against a
+     *   Node the harness rejects.
+     *
+     * A shell string rather than an argv list because it is handed to a terminal
+     * for a human to watch, so it has to be a thing they could have typed. That
+     * is also why the paths are quoted rather than escaped per-character — this
+     * is the one place in the plugin where a shell is involved, and it takes no
+     * model or user input, only two paths and a version constant.
+     */
+    fun installCommand(): String {
+        val prefix = DshPaths.toolchainDir(env).absolutePath
+        val install = """npm install -g --prefix "$prefix" ${DshCli.PINNED_SPEC}"""
+        val nodeBin = (_install.value as? DshInstall.DshMissing)?.node?.parentFile?.absolutePath
+        return if (nodeBin == null) install else """PATH="$nodeBin:${'$'}PATH" $install"""
+    }
 
     /**
      * Workspace root handed to the harness as its cwd.
@@ -412,5 +513,19 @@ class DshEngine(
         const val VERSION_TIMEOUT = 60L
         const val BUNDLE_TIMEOUT = 600L
         const val DUMP_TIMEOUT = 120L
+
+        /**
+         * How long to watch for a terminal install to finish.
+         *
+         * Generous because the install is: over five minutes for a cold
+         * dependency tree, and the tree is ~270 MB across ~40 direct
+         * dependencies. Giving up early would put the panel back on "not
+         * installed" while npm was still working, which is worse than the stale
+         * state this watch exists to fix.
+         */
+        const val INSTALL_WATCH_TIMEOUT_MS = 20 * 60 * 1000L
+
+        /** Cheap: a `File.isFile` until there is something worth spawning for. */
+        const val INSTALL_WATCH_INTERVAL_MS = 2_000L
     }
 }

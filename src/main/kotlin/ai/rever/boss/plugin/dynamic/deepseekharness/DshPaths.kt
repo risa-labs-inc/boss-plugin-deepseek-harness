@@ -58,6 +58,55 @@ object DshPaths {
     fun overlayDir(env: Map<String, String> = System.getenv()): File = File(home(env), "boss-overlays")
 
     /**
+     * The npm prefix this plugin installs the harness into.
+     *
+     * Not `npm install -g`, which was the first implementation and is wrong three
+     * ways. It writes into whichever Node's global prefix happens to be selected,
+     * so the harness silently disappears when the user switches Node version. It
+     * needs a writable global prefix, which a Homebrew or system Node may not
+     * give without sudo. And it leaves `dsh` behind when the plugin is
+     * uninstalled, because nothing here can safely remove a binary that the user
+     * might also have installed for themselves.
+     *
+     * A prefix the plugin owns has none of those problems: `npm install -g
+     * --prefix <this>` lays out `bin/dsh` and `lib/node_modules`, the tree
+     * belongs to one plugin, and removing the directory removes the install.
+     *
+     * Under the harness home rather than beside it so `$DSH_HOME` still moves
+     * everything together, and named for BOSS so it cannot be confused with
+     * anything the harness itself writes — same reasoning as [overlayDir].
+     */
+    fun toolchainDir(env: Map<String, String> = System.getenv()): File = File(home(env), "boss-toolchain")
+
+    /**
+     * `<toolchain>/bin` — where npm links the executable on Unix.
+     *
+     * Windows is the exception and is why [toolchainExecDirs] exists rather than
+     * every caller using this one: `npm install -g --prefix C:\dir` shims to
+     * `C:\dir\dsh.cmd`, in the prefix *root*, with no `bin` directory at all.
+     */
+    fun toolchainBin(env: Map<String, String> = System.getenv()): File = File(toolchainDir(env), "bin")
+
+    /**
+     * Every directory the prefix might have put an executable in, most likely
+     * first. Both are handed to child processes: getting it wrong on one platform
+     * would mean the plugin installs the harness and then cannot find it.
+     */
+    fun toolchainExecDirs(env: Map<String, String> = System.getenv()): List<File> =
+        listOf(toolchainBin(env), toolchainDir(env))
+
+    /**
+     * The `dsh` this plugin installed, or null when it is not there.
+     *
+     * Both layouts and both spellings: npm writes a `.cmd` shim on Windows and an
+     * extensionless shell script elsewhere, in different directories.
+     */
+    fun installedDsh(env: Map<String, String> = System.getenv()): File? =
+        toolchainExecDirs(env)
+            .flatMap { dir -> listOf("dsh.cmd", "dsh").map { File(dir, it) } }
+            .firstOrNull { it.isFile && it.canExecute() }
+
+    /**
      * A profile that the harness initializes on its own.
      *
      * The distinction matters for messaging: a missing `web` directory is
