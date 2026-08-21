@@ -23,6 +23,7 @@ DshCredentials     DEEPSEEK_API_KEY from BOSS -> child env
 DshMcpBridge       the opt-in cordis patch overlay
 DshMcpTools        the dsh_* tools
 DshPaths           $DSH_HOME resolution (pure - creates nothing)
+DshIcon            the DeepSeek whale, shared by the panel and the tab
 ```
 
 ## Verified facts about the harness
@@ -96,6 +97,36 @@ of these after a harness upgrade.
   `thin` classifier so the two cannot collide; without it you can ship a jar that
   loads with no panel and no tools.
 
+## The icon
+
+`DshIcon.kt` holds the DeepSeek whale as an `ImageVector`, aliased once and used
+by the panel, the tab type and the tab info - `DshIconTest` fails if those three
+ever point at different vectors.
+
+- **It is hand-carried because nothing supplies it.** The `simple-icons` Compose
+  port the host bundles is 1.1.1, which predates DeepSeek, and Material has no
+  whale. Note that boss-plugin-docker's icon is *also* a whale, so the two sit
+  side by side in the sidebar; this is the DeepSeek silhouette, not a second
+  Docker.
+- **The path string is upstream's `deepseek.svg`, verbatim, and parsed at build
+  time** via `PathParser` rather than transcribed into `PathBuilder` calls. The
+  outline has 15 elliptical arcs; hand-converting ~2,000 characters of arc
+  parameters corrupts silently. Keeping the string intact also means a logo change
+  is a copy-paste and can be diffed against upstream.
+- **Opaque black at 24x24**, matching the `simple-icons` convention, because
+  callers tint it. Baking in DeepSeek blue would ignore `Icon`'s tint and render
+  the same colour in both themes, which is what makes a sidebar item's selected
+  and disabled states read wrong.
+- **A truncated path still builds and still draws something**, so
+  `DshIconTest` asserts a node-count floor. Verified by truncating the literal to
+  3 of its 22 chunks: the test fails.
+- **The manifest's `panel.icon` string is not what you see.** Nothing on the
+  in-process path reads it - `iconName` is consumed only by
+  `RemoteUiSurfaceRegistry` (the out-of-process UI path) and a host test. The real
+  icon is `PanelInfo.icon`. It is left as a valid Material name so it always
+  resolves; do not "fix" the apparent mismatch by hunting for a whale that is not
+  there.
+
 ## MCP tools
 
 RBAC lives in the manifest (`dsh.run`, `dsh.manage`) and is asserted in
@@ -113,7 +144,7 @@ filter when answering a question about one setting.
 ## Testing
 
 ```bash
-./gradlew build   # 49 tests
+./gradlew build   # 54 tests
 ```
 
 Count results from `build/test-results/test/*.xml`, not from "BUILD SUCCESSFUL" -

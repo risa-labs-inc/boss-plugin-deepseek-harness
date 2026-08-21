@@ -4,8 +4,6 @@ import ai.rever.boss.plugin.api.Panel.Companion.bottom
 import ai.rever.boss.plugin.api.Panel.Companion.left
 import ai.rever.boss.plugin.api.PanelId
 import ai.rever.boss.plugin.api.PanelInfo
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.AutoAwesome
 
 object DshPanelInfo : PanelInfo {
     /**
@@ -18,6 +16,6 @@ object DshPanelInfo : PanelInfo {
      */
     override val id = PanelId("deepseek-harness-panel", 58)
     override val displayName = "DeepSeek Harness"
-    override val icon = Icons.Outlined.AutoAwesome
+    override val icon = DeepSeekIcon
     override val defaultSlotPosition = left.bottom
 }
