@@ -173,6 +173,39 @@ one route were deduped with `distinctBy` over a Set, which on a real store picke
 a colleague's `OPEN_AI_API_KEY` over the user's own `OPENAI_API_KEY`. There is now
 a canonical spelling per route.
 
+### The BOSS MCP bridge: ports and both launch paths
+
+**7677 is BossTerm's MCP server, not BOSS's.** Probed on a live machine:
+
+| Port | `initialize` reports |
+|---|---|
+| 7677 | `bossterm` |
+| **7679** | **`boss`** |
+| 7680 | `boss` (second instance / fallback) |
+
+The first version hardcoded 7677 plus an invented `BOSS_MCP_PORT` env var the host
+never sets, so the bridge pointed at the wrong server and no BOSS tool ever
+reached the harness. Never hardcode a port: ask
+`McpServerController.state`, which reports the **bound** port (its own doc notes
+it may be a fallback) and the server name. The name matters too - the same server
+answers to `boss` inside BOSS and `bossterm` standalone, and the model-facing
+`mcp__<name>__*` prefix follows it. Resolve per call, never at `register()`:
+terminal-tab may not have loaded yet.
+
+**The overlay must reach BOTH launch paths.** It was passed to `dsh web` only, so
+the web UI could call every BOSS tool while `dsh_ask` reported having none -
+silent, since the tools were merely absent. `headlessArgv` is extracted for that
+reason and `DshHeadlessArgvTest` pins it, including that `--patch` precedes the
+task (a launcher flag after the task reaches the app, which does not know it).
+
+Verified live: with the bridge on, a headless turn lists 187 `mcp__boss__*` tools.
+
+**Consequence of env-only injection, now observed:** a route BOSS registered fails
+in a plain terminal. `dsh --profile headless` run from a shell gives
+`MISSING_CREDENTIAL: llm-pi-ai: no credential for provider route "openai"; its
+profile resolves OPENAI_API_KEY, which is not set`, because only BOSS injects it.
+That is the accepted trade of keeping secrets off disk.
+
 ## The icon
 
 `DshIcon.kt` holds the DeepSeek whale as an `ImageVector`, aliased once and used

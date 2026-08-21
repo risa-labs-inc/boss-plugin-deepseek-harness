@@ -91,6 +91,12 @@ tasks.jar {
 
 // Sync version from build.gradle.kts into plugin.json (single source of truth).
 tasks.processResources {
+    // Declare the version as an input, or the task stays UP-TO-DATE across a bump:
+    // plugin.json's *source* has not changed, so Gradle skips the filter and the
+    // jar ships a stale version. That is local-build only - CI builds from a fresh
+    // checkout - but it made every hot-reload report the previous version, which
+    // is exactly the label you reach for to check what is loaded.
+    inputs.property("pluginVersion", version)
     filesMatching("**/plugin.json") {
         filter { line ->
             line.replace(Regex(""""version"\s*:\s*"[^"]*""""), """"version": "$version"""")

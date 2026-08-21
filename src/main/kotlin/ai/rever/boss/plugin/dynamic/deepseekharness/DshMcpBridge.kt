@@ -45,12 +45,15 @@ class DshMcpBridge(private val env: Map<String, String> = System.getenv()) {
         const val ROW_ID = "boss-mcp-bridge"
 
         /**
-         * The `serverName`, which fixes the model-facing tool prefix at
-         * `mcp__boss__*`. Chosen to match what BOSS's in-terminal agents already
-         * call these tools, so a prompt or skill that names one works unchanged
-         * on both sides. The harness constrains this to `[A-Za-z0-9_-]{1,32}`.
+         * The name used when the host cannot be asked.
+         *
+         * Normally the name comes from [McpServerState.serverName], because the
+         * same server answers to `boss` inside BOSS and `bossterm` in a standalone
+         * BossTerm - and the model-facing tool prefix follows it, so a hardcoded
+         * name would make every `mcp__boss__*` reference wrong on one of the two.
+         * The harness constrains it to `[A-Za-z0-9_-]{1,32}`.
          */
-        const val SERVER_NAME = "boss"
+        const val DEFAULT_SERVER_NAME = "boss"
 
         private const val FILE_NAME = "boss-mcp.yml"
     }
@@ -64,10 +67,10 @@ class DshMcpBridge(private val env: Map<String, String> = System.getenv()) {
      * Rewritten on every enable rather than written once, so a changed port is
      * picked up without the user having to know a stale file exists.
      */
-    fun writeOverlay(mcpUrl: String): File {
+    fun writeOverlay(serverName: String, mcpUrl: String): File {
         val file = overlayFile()
         file.parentFile?.mkdirs()
-        file.writeText(overlayYaml(mcpUrl))
+        file.writeText(overlayYaml(serverName, mcpUrl))
         return file
     }
 
@@ -83,19 +86,19 @@ class DshMcpBridge(private val env: Map<String, String> = System.getenv()) {
      * than a `!!js process.env...` expression so that what the file says is what
      * the harness uses, and `--dump-config` shows the real value.
      */
-    internal fun overlayYaml(mcpUrl: String): String = """
+    internal fun overlayYaml(serverName: String, mcpUrl: String): String = """
         # Written by the BOSS DeepSeek Harness plugin. Safe to delete: it is passed
         # with --patch only while the "BOSS MCP tools" toggle is on, and rewritten
         # whenever that toggle is turned on again.
         #
         # This exposes every tool BOSS's MCP server offers to harness agents as
-        # mcp__${SERVER_NAME}__*. An MCP server is trusted executable code outside the
+        # mcp__${serverName}__*. An MCP server is trusted executable code outside the
         # harness's agent sandbox, which is why the harness enables none by default.
         - insert:
             - id: $ROW_ID
               name: '@deepseek-ai/dsh-mcp-client'
               config:
-                serverName: $SERVER_NAME
+                serverName: $serverName
                 transport: streamable-http
                 url: $mcpUrl
     """.trimIndent() + "\n"

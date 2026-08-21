@@ -102,6 +102,31 @@ class DshEngine(
      * miserable thing to debug.
      */
     /**
+     * The `--patch` overlay to pass a harness launch, or null when the bridge is
+     * off or its overlay is missing.
+     *
+     * Shared by both launch paths so they cannot diverge - which they did.
+     */
+    /**
+     * argv for a one-shot run.
+     *
+     * Extracted so it can be tested. The overlay not reaching this path was a
+     * silent bug: the web UI could call BOSS tools while `dsh_ask` reported having
+     * none, because only the server was passed `--patch`. Launcher flags must
+     * precede the app's arguments, so `--patch` comes before the task - putting it
+     * after would hand it to the headless app, which does not know the flag.
+     */
+    internal fun headlessArgv(dsh: File, task: String, overlay: File?): List<String> = buildList {
+        add(dsh.absolutePath)
+        add("--profile"); add("headless")
+        if (overlay != null) { add("--patch"); add(overlay.absolutePath) }
+        add(task)
+    }
+
+    private fun bridgeOverlay(): File? =
+        if (_bridgeEnabled.value) bridge.overlayFile().takeIf { it.isFile } else null
+
+    /**
      * A trailing note when provider registration declined, and nothing otherwise.
      *
      * Both launch paths used to discard the outcome, so a refusal was only visible
@@ -180,7 +205,7 @@ class DshEngine(
     suspend fun startServer(): String {
         val ready = _install.value as? DshInstall.Ready
             ?: return "DeepSeek Harness is not installed. Open the DeepSeek Harness panel to install it."
-        val overlay = if (_bridgeEnabled.value) bridge.overlayFile().takeIf { it.isFile } else null
+        val overlay = bridgeOverlay()
         syncProviders()
         _busy.value = "Starting dsh web"
         return try {
@@ -216,7 +241,11 @@ class DshEngine(
         syncProviders()
 
         val exec = DshCli.exec(
-            argv = listOf(ready.dsh.absolutePath, "--profile", "headless", task),
+            // The overlay has to reach this path too. It did not, and the
+            // symptom was silent: the web UI could call BOSS tools while dsh_ask
+            // reported having none, because only the server was passed --patch.
+            // Launcher flags precede the app's, so --patch comes before the task.
+            argv = headlessArgv(ready.dsh, task, bridgeOverlay()),
             cwd = cwd,
             extraEnv = childEnv(),
             timeoutSeconds = timeoutSeconds,
@@ -336,11 +365,11 @@ class DshEngine(
      * running server keeps the composition it started with, so the caller is told
      * a restart is needed rather than left to wonder why nothing changed.
      */
-    fun setBridgeEnabled(enabled: Boolean, mcpUrl: String): String {
+    fun setBridgeEnabled(enabled: Boolean, serverName: String, mcpUrl: String): String {
         _bridgeEnabled.value = enabled
         return if (enabled) {
-            bridge.writeOverlay(mcpUrl)
-            "BOSS MCP tools will be served to harness agents as `mcp__${DshMcpBridge.SERVER_NAME}__*`. " +
+            bridge.writeOverlay(serverName, mcpUrl)
+            "BOSS MCP tools will be served to harness agents as `mcp__${serverName}__*`. " +
                 "Restart the server to apply."
         } else {
             "BOSS MCP tools will no longer be served. Restart the server to apply."
