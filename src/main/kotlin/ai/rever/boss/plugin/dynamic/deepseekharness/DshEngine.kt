@@ -37,8 +37,32 @@ class DshEngine(
     private val _keySource = MutableStateFlow(DshKeySource.NONE)
     val keySource: StateFlow<DshKeySource> = _keySource.asStateFlow()
 
-    private val _bridgeEnabled = MutableStateFlow(false)
+    /**
+     * Default **on**: a harness agent that cannot reach BOSS's tools is the less
+     * useful of the two defaults, and it is BOSS's own server on the other end -
+     * the same one every in-terminal agent already talks to, not a third party's.
+     * [DshServices] restores an explicit choice over this, and records both
+     * directions, so a user who turns it off stays off.
+     */
+    private val _bridgeEnabled = MutableStateFlow(true)
     val bridgeEnabled: StateFlow<Boolean> = _bridgeEnabled.asStateFlow()
+
+    /**
+     * How to find BOSS's MCP server, resolved live at every harness launch.
+     *
+     * A seam rather than a direct call because the lookup needs
+     * [ai.rever.boss.plugin.api.McpServerController], which [DshServices] owns.
+     * Default answers null, which is the hostile case: the engine must launch
+     * without a bridge rather than fail.
+     *
+     * Live, per launch, is load-bearing twice over. The bound port can differ
+     * between runs, so an overlay written last time can point at nothing. And the
+     * host's MCP server may not have started when this plugin loaded - which with
+     * a default-on bridge would otherwise mean the toggle reads on while the
+     * harness silently got no tools, the exact failure the old load-time
+     * resolution had.
+     */
+    var mcpEndpoint: () -> Pair<String, String>? = { null }
 
     private val _keyCandidates = MutableStateFlow<List<DshKeyCandidate>>(emptyList())
     val keyCandidates: StateFlow<List<DshKeyCandidate>> = _keyCandidates.asStateFlow()
@@ -124,8 +148,21 @@ class DshEngine(
         add(task)
     }
 
-    private fun bridgeOverlay(): File? =
-        if (_bridgeEnabled.value) bridge.overlayFile().takeIf { it.isFile } else null
+    /**
+     * The `--patch` overlay for a harness launch, or null when there is none to
+     * pass.
+     *
+     * Written fresh from a live endpoint rather than read off disk. Passing a
+     * stale overlay would point the harness's MCP client at a dead port, and a
+     * plugin row that cannot initialise is exactly the class of failure that
+     * stops `dsh web` booting at all - see [DshFailure]. No endpoint now means no
+     * overlay now, which costs the tools and nothing else.
+     */
+    internal fun bridgeOverlay(): File? {
+        if (!_bridgeEnabled.value) return null
+        val (serverName, mcpUrl) = mcpEndpoint() ?: return null
+        return runCatching { bridge.writeOverlay(serverName, mcpUrl) }.getOrNull()
+    }
 
     /**
      * A trailing note when provider registration declined, and nothing otherwise.
@@ -303,8 +340,9 @@ class DshEngine(
      * The harness's headless profile prints the final assistant text on stdout
      * and exits 0 for a completed turn, 1 otherwise, with diagnostics on stderr.
      * Both non-zero cases are mapped to something a caller can act on rather
-     * than passed through raw: a missing credential is the single most likely
-     * failure and has nothing to do with the task.
+     * than passed through raw - see [DshFailure]. A missing credential is the
+     * single most likely failure and has nothing to do with the task; a boot
+     * failure is the second, and arrives as thirty lines of Node stack.
      */
     suspend fun ask(task: String, cwd: File?, timeoutSeconds: Long): Pair<String, Boolean> {
         val ready = _install.value as? DshInstall.Ready
@@ -329,10 +367,11 @@ class DshEngine(
                 registerNote()) to false
             exec.timedOut -> "The task exceeded ${timeoutSeconds}s and was stopped." to true
             exec.missing -> "DeepSeek Harness could not be started." to true
-            exec.message.contains(DshCredentials.MISSING_MARKER) ->
-                ("No DeepSeek API key is configured. Add a DeepSeek provider on BOSS's AI Providers " +
-                    "settings page, or store a `${DshCredentials.SECRET_WEBSITE}` secret, then retry.") to true
-            else -> exec.message.ifBlank { "The turn ended without completing." } to true
+            // Both the missing-key remedy and the "your credentials file has a
+            // non-credential in it" remedy live in DshFailure, so this path and
+            // the server's failure path answer the same failure the same way.
+            else -> DshFailure.explain(exec.message)
+                .ifBlank { "The turn ended without completing." } to true
         }
     }
 
@@ -374,11 +413,7 @@ class DshEngine(
         val ready = _install.value as? DshInstall.Ready
             ?: return "DeepSeek Harness is not installed." to true
         val flag = if (defaultsOnly) "--dump-default-config" else "--dump-config"
-        val overlay = if (!defaultsOnly && _bridgeEnabled.value) {
-            bridge.overlayFile().takeIf { it.isFile }
-        } else {
-            null
-        }
+        val overlay = if (defaultsOnly) null else bridgeOverlay()
         val argv = buildList {
             add(ready.dsh.absolutePath)
             add("--profile"); add(profile)
@@ -438,6 +473,18 @@ class DshEngine(
      * running server keeps the composition it started with, so the caller is told
      * a restart is needed rather than left to wonder why nothing changed.
      */
+    /**
+     * Restore a stored preference at load, without touching the overlay.
+     *
+     * Separate from [setBridgeEnabled] because a restore is not a decision: it
+     * must not need an endpoint (the host's MCP server may still be starting),
+     * has no one to report a message to, and the overlay it would write is
+     * rewritten at the next launch anyway.
+     */
+    fun restoreBridge(enabled: Boolean) {
+        _bridgeEnabled.value = enabled
+    }
+
     fun setBridgeEnabled(enabled: Boolean, serverName: String, mcpUrl: String): String {
         _bridgeEnabled.value = enabled
         return if (enabled) {

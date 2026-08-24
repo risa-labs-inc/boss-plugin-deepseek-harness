@@ -8,12 +8,18 @@ import java.io.File
  * The harness ships `@deepseek-ai/dsh-mcp-client` as a dependency precisely so a
  * patch layer can add servers, but enables **none** by default, and says why:
  * each server command is trusted executable code outside the agent sandbox. That
- * is a real decision, not an oversight, so this bridge is opt-in and default-off,
- * and the panel repeats the reason rather than burying it.
+ * is a real decision, and it is a decision about *arbitrary* servers.
  *
- * Turning it on gives a harness agent every `mcp__boss__*` tool BOSS currently
- * exposes — the same set an in-terminal agent sees, since it is literally the
- * same server.
+ * This bridge points at exactly one: BOSS's own, the same server every
+ * in-terminal agent in this app already talks to. Nothing new becomes reachable
+ * that the user has not already granted to the agents beside it, and the tools
+ * are RBAC-gated at the host end regardless. So the bridge is **on by default**
+ * — a harness agent inside BOSS that cannot see BOSS is the stranger of the two
+ * defaults — while the panel still states what it grants, and the toggle still
+ * turns it off for good ([DshServices.BRIDGE_DEFAULT]).
+ *
+ * On, a harness agent gets every `mcp__boss__*` tool BOSS currently exposes —
+ * the same set an in-terminal agent sees, since it is literally the same server.
  *
  * ## Why an overlay file rather than editing a patch layer
  *
@@ -93,7 +99,8 @@ class DshMcpBridge(private val env: Map<String, String> = System.getenv()) {
         #
         # This exposes every tool BOSS's MCP server offers to harness agents as
         # mcp__${serverName}__*. An MCP server is trusted executable code outside the
-        # harness's agent sandbox, which is why the harness enables none by default.
+        # harness's agent sandbox, which is why the harness enables none of its own
+        # accord; this one is BOSS's, and BOSS turns it on by default.
         - insert:
             - id: $ROW_ID
               name: '@deepseek-ai/dsh-mcp-client'
