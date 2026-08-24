@@ -8,7 +8,8 @@ the harness's own web UI, and `dsh_*` MCP tools so in-terminal agents can drive 
 
 - **A panel** with the harness's readiness (node, `dsh`, pnpm, and versions),
   a Start/Stop control for its server, the profiles under your harness home,
-  where its API key is coming from, and the BOSS MCP bridge toggle.
+  where its API key is coming from, and the BOSS MCP bridge toggle (on by
+  default).
 - **A tab** showing the harness's own web UI - streaming, tool calls, approvals,
   session list, model picker - served by the process the panel supervises.
 - **MCP tools** so an agent can ask the harness to do work, manage its profiles
@@ -65,21 +66,23 @@ have this value".
 
 ## The BOSS MCP bridge
 
-Off by default. When on, harness agents can call every BOSS tool as
-`mcp__boss__*` - the same server BOSS's own in-terminal agents use.
+On by default. Harness agents can call every BOSS tool as `mcp__boss__*` - the
+same server BOSS's own in-terminal agents use, under the same permissions.
 
-The harness ships an MCP client but enables no server by default, on the grounds
-that each server command is trusted executable code outside its agent sandbox.
-That reasoning applies here too, which is why this is opt-in and why the panel
-repeats it.
+The harness ships an MCP client but enables no server of its own accord, on the
+grounds that each server command is trusted executable code outside its agent
+sandbox. That is a judgement about *arbitrary* servers. This bridge points at
+exactly one, BOSS's own, so nothing becomes reachable that you have not already
+granted to the agents beside it - which is why it is on rather than opt-in, and
+why the panel still says what it grants. One switch turns it off for good.
 
 The bridge is a `--patch` overlay the plugin owns, at
 `$DSH_HOME/boss-overlays/boss-mcp.yml`. Your own `cordis.patch.yml` layers are
 never touched. Restart the server to apply a change - bundle and composition
 membership is fixed when a profile starts.
 
-Enabling it is a panel action, deliberately not an MCP tool: it widens what the
-harness can reach, so it stays a decision a person makes.
+The switch is a panel action, deliberately not an MCP tool: turning the bridge
+off is a decision a person makes, not one an agent makes for them.
 
 ## What this plugin depends on, and what it avoids
 

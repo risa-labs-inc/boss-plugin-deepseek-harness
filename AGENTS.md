@@ -19,6 +19,7 @@ DshEngine          all state (StateFlow) and every operation
 DshCli             THE only place a process is started
 DshProcesses       killing a process and its descendants
 DshWebServer       spawn / await / reap `dsh web`
+DshFailure         a harness death rattle -> one line someone can act on
 DshCredentials     DEEPSEEK_API_KEY from BOSS -> child env
 DshMcpBridge       the opt-in cordis patch overlay
 DshMcpTools        the dsh_* tools
@@ -61,6 +62,17 @@ of these after a harness upgrade.
   SIGINT reports 130.
 - **`$DSH_HOME` defaults to `~/.dsh`**, with `profiles/`, `sessions/`,
   `settings.yaml`, `.credentials.yaml`.
+- **`.credentials.yaml` is a flat mapping of `NAME: "string"` and nothing else.**
+  `dsh-credentials-local`'s `parseCredentialsDocument` rejects, rather than skips,
+  a non-mapping root, a key outside `/^[A-Za-z_][A-Za-z0-9_]*$/`, a non-string
+  value, an empty string, a duplicate key, and a file any other OS user can read.
+  Each of those aborts `[cordis.init]`, which fails the profile's `#credentials`
+  include, which fails the whole plugin tree - so **one stray line in that file
+  means `dsh web` does not boot at all**. Reported from the field as
+  `the value for "version" in ~/.dsh/.credentials.yaml must be a string`, from a
+  hand-added `version: 1`. The plugin does not write this file and never has;
+  `DshFailure` says so in the remedy, because a BOSS dialog naming a file the user
+  never opened reads as BOSS having written it.
 
 ## Traps
 
@@ -111,6 +123,13 @@ of these after a harness upgrade.
 - **Never a shell string.** Task text comes from a model. `DshCli.exec` takes a
   `List<String>` so there is no shell to inject into. `DshCliTest` pins this with
   a hostile task.
+- **A Node stack trace's useful part is at the FRONT.** The opposite of a JVM
+  trace, and `DshWebServer.failureText` used to keep the last twelve lines "because
+  a stack trace's useful part is at the end". Node prints the message first and
+  frames after it, then repeats the message once per `[cause]` - so the tail was
+  the one slice guaranteed to say nothing, and the field report was an error dialog
+  opening on `at Entry._init (file:///...cordis-plugin-loader/lib/index.js:519:10) {`.
+  Every transcript now goes through `DshFailure.explain`.
 - **Drain stdout and stderr concurrently.** Reading them in sequence deadlocks the
   moment the child fills the pipe nobody is reading. Pinned by a 4000-line test.
 - **Kill descendants, and snapshot them first.** A dead parent's descendants are
@@ -231,6 +250,26 @@ answers to `boss` inside BOSS and `bossterm` standalone, and the model-facing
 `mcp__<name>__*` prefix follows it. Resolve per call, never at `register()`:
 terminal-tab may not have loaded yet.
 
+**The bridge is ON by default**, and the overlay is written fresh at every
+harness launch rather than read off disk. Those two are one change. Default-off
+could afford to resolve the endpoint once in `DshServices.start()`, because a
+user who had just clicked the toggle was demonstrably looking at a running host.
+Default-on cannot: plugin load order is not guaranteed, so BOSS's MCP server may
+not answer when this plugin loads, and the result would be a toggle reading "on"
+while the harness silently got nothing. `DshEngine.mcpEndpoint` is a seam
+`DshServices` fills in; `bridgeOverlay()` resolves through it per launch and
+passes **no** overlay when nothing answers - never a stale one, because a row the
+harness cannot initialise stops `dsh web` booting at all.
+
+`DshServices.BRIDGE_DEFAULT` is the stored default and only applies to an install
+that never touched the toggle: `setBridgeEnabled` writes the pref in both
+directions, so a user's "off" is a stored value, not an absent one, and survives.
+
+The security argument in the harness's own docs is about *arbitrary* MCP servers.
+This bridge points at exactly one - BOSS's own, the same server every in-terminal
+agent in this app already talks to, RBAC-gated at the host end. Nothing new
+becomes reachable that the user has not already granted to the agents beside it.
+
 **The overlay must reach BOTH launch paths.** It was passed to `dsh web` only, so
 the web UI could call every BOSS tool while `dsh_ask` reported having none -
 silent, since the tools were merely absent. `headlessArgv` is extracted for that
@@ -283,8 +322,9 @@ RBAC lives in the manifest (`dsh.run`, `dsh.manage`) and is asserted in
 `DshMcpToolProvider.UNGATED_MUTATING_TOOLS` - the test fails if that entry names
 a tool that no longer exists or has become read-only.
 
-Enabling the BOSS MCP bridge is **not** a tool, on purpose. It widens what the
-harness can reach, so it stays a panel action a person takes.
+Enabling the BOSS MCP bridge is **not** a tool, on purpose: it is on by default,
+and turning it off is a decision a person makes in the panel, not one an agent
+makes for them.
 
 `dsh_dump_config` takes a `row` filter. The full tree is ~15k tokens; prefer the
 filter when answering a question about one setting.
@@ -292,7 +332,7 @@ filter when answering a question about one setting.
 ## Testing
 
 ```bash
-./gradlew build   # 151 tests
+./gradlew build   # 173 tests
 ```
 
 Count results from `build/test-results/test/*.xml`, not from "BUILD SUCCESSFUL" -
@@ -309,6 +349,10 @@ Both central guards have been shown to fail against a real mutation:
   `DshInstallTerminalTest`
 - latching `awaitInstalled` on the binary appearing, without re-probing, fails 2
   in `DshAwaitInstalledTest`
+- restoring `failureText`'s last-twelve-lines rule, and making `DshFailure.explain`
+  a passthrough, fails 10 of 14 in `DshFailureTest`
+- defaulting the bridge back to off, and reading the overlay off disk instead of
+  rewriting it per launch, fails 5 of 8 in `DshBridgeDefaultTest`
 
 Do that again for any new guard. Two regression tests in this workspace's history
 passed against their own bug.

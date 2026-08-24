@@ -226,11 +226,6 @@ class DshWebServer(
      */
     private fun childPathForSpawn(): String = DshCli.childPath()
 
-    /** Keep the tail: a stack trace's useful part is at the end, not the start. */
-    private fun failureText(transcript: String): String =
-        transcript.trim().lines().takeLast(FAILURE_LINES).joinToString("\n")
-            .ifBlank { "dsh web exited without output" }
-
     companion object {
         /**
          * Matches the harness's readiness line, e.g.
@@ -245,7 +240,25 @@ class DshWebServer(
         private const val STARTUP_TIMEOUT_MS = 120_000L
         private const val HTTP_POLL_MS = 250L
         private const val PROBE_TIMEOUT_MS = 2_000
-        private const val FAILURE_LINES = 12
+
+        /**
+         * Reduce the transcript of a failed boot to a diagnosis.
+         *
+         * This used to keep the last twelve lines, "because a stack trace's
+         * useful part is at the end". It is, in a JVM trace. The harness is a
+         * Node program, where the message is the *first* line and everything
+         * after it is frames — so the tail was the one part guaranteed to say
+         * nothing, and a user whose `.credentials.yaml` held one bad line got an
+         * error dialog opening on
+         * `at Entry._init (file:///…cordis-plugin-loader/lib/index.js:519:10) {`.
+         * See [DshFailure].
+         *
+         * Internal rather than private, and in the companion rather than on the
+         * instance, for the same reason [parsePort] is: it reads no state, and
+         * what it does to a real transcript is worth pinning.
+         */
+        internal fun failureText(transcript: String): String =
+            DshFailure.explain(transcript).ifBlank { "dsh web exited without output" }
 
         /** The port from a readiness line, or null when the line is not one. */
         internal fun parsePort(line: String): Int? =

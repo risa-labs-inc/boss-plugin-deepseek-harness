@@ -29,16 +29,19 @@ class DshServices(val context: PluginContext) {
     }
 
     fun start() {
+        // The engine resolves this at every harness launch, never here: plugin
+        // load order is not guaranteed, so the host's MCP server may not answer
+        // yet, and with the bridge on by default that used to mean the toggle read
+        // on while the harness silently got no tools.
+        engine.mcpEndpoint = ::bossMcpEndpoint
+
         scope.launch {
             // Restore the bridge preference before the first start, or a server
             // started from a restored session would compose without the overlay
-            // while the toggle showed as on.
-            val enabled = getPref(KEY_BRIDGE, "false").toBoolean()
-            if (enabled) {
-                // Re-resolve rather than trust the stored overlay: the bound port
-                // can differ from the one recorded last run.
-                bossMcpEndpoint()?.let { engine.setBridgeEnabled(true, it.first, it.second) }
-            }
+            // while the toggle showed as on. Default TRUE: see
+            // DshEngine._bridgeEnabled. The pref is written on both transitions,
+            // so an explicit "off" is stored and outranks the default.
+            engine.restoreBridge(getPref(KEY_BRIDGE, BRIDGE_DEFAULT).toBoolean())
             // Restore before the first launch, or a server started from a
             // restored session would run without the keys the panel shows ticked.
             engine.setKeySelection(
@@ -227,6 +230,16 @@ class DshServices(val context: PluginContext) {
     companion object {
         const val PLUGIN_ID = "ai.rever.boss.plugin.dynamic.deepseekharness"
         const val KEY_BRIDGE = "bossMcpBridgeEnabled"
+
+        /**
+         * On unless the user said otherwise.
+         *
+         * Flipping this from "false" turns the bridge on for every install that
+         * never touched the toggle. It cannot resurrect itself for someone who
+         * turned it off: [setBridgeEnabled] writes the pref in both directions,
+         * so "off" is a stored value rather than an absent one.
+         */
+        const val BRIDGE_DEFAULT = "true"
         const val KEY_KEYS_ON = "providerKeysOn"
         const val KEY_KEYS_OFF = "providerKeysOff"
 
