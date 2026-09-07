@@ -80,7 +80,7 @@ object DshCli {
      * candidate and runs it before opening the PR, so moving forward stays a
      * decision with evidence rather than a side effect of the clock.
      */
-    const val PINNED_VERSION = "0.1.0-rc.7"
+    const val PINNED_VERSION = "0.1.2-rc.1"
 
     /** What to hand npm: the pinned package spec. */
     const val PINNED_SPEC = "$PACKAGE@$PINNED_VERSION"
