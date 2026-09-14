@@ -131,7 +131,7 @@ class DshPanelViewModel(private val services: DshServices) {
 
     fun copyUrl() {
         val running = server.value as? DshServer.Running ?: return
-        services.context.clipboardProvider?.setText(running.url)
+        services.context.clipboardProvider?.setText(running.browserUrl)
         services.toastSuccess("Copied ${running.url}")
     }
 

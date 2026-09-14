@@ -55,4 +55,16 @@ class DshWebServerParseTest {
     fun `the first loopback port on the line wins`() {
         assertEquals(4321, DshWebServer.parsePort("dsh web: http://127.0.0.1:4321 (was http://127.0.0.1:1111)"))
     }
+    @Test
+    fun `diagnostic URLs and malformed authorities cannot supply readiness`() {
+        for (line in listOf(
+            "diagnostic: http://127.0.0.1:3080",
+            "dsh web: http://127.0.0.1:123456",
+            "dsh web: http://127.0.0.1:3080.evil.example",
+            "dsh web: http://127.0.0.1:3080@evil.example",
+            "dsh web: http://127.0.0.1:3080/path",
+            "dsh web: http://127.0.0.1:3080/#fragment",
+        )) assertNull(DshWebServer.parseBrowserUrl(line), line)
+    }
+
 }

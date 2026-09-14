@@ -202,7 +202,7 @@ class DshServices(val context: PluginContext) {
     /** Open [url] in a host browser tab — the fallback when embedding is unavailable. */
     fun openUrl(url: String, title: String) {
         val ops = context.splitViewOperations ?: run {
-            toastError("Cannot open $url - this host exposes no split-view operations")
+            toastError("Cannot open $title - this host exposes no split-view operations")
             return
         }
         ops.openUrlInActivePanel(url, title)

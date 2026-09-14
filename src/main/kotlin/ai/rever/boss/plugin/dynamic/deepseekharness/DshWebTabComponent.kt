@@ -115,23 +115,22 @@ private fun EmbeddedHarness(state: DshServer.Running, services: DshServices) {
             Spacer(Modifier.height(14.dp))
             BossPrimaryButton(
                 text = "Open in browser tab",
-                onClick = { services.openUrl(state.url, "DeepSeek Harness") },
+                onClick = { services.openUrl(state.browserUrl, "DeepSeek Harness") },
                 icon = Icons.Outlined.OpenInBrowser,
             )
         }
         return
     }
 
-    // Keyed on the port: a restarted server gets a new port, and a handle still
-    // pointed at the old one would show a dead page forever.
-    var handle by remember(state.port) { mutableStateOf<BrowserHandle?>(null) }
+    // A restarted server has a new launch token even if its port is reused.
+    var handle by remember(state) { mutableStateOf<BrowserHandle?>(null) }
 
-    LaunchedEffect(state.port) {
+    LaunchedEffect(state) {
         handle?.dispose()
-        handle = browserService.createBrowser(BrowserConfig(url = state.url))
+        handle = browserService.createBrowser(BrowserConfig(url = state.browserUrl))
     }
 
-    DisposableEffect(state.port) {
+    DisposableEffect(state) {
         onDispose {
             handle?.dispose()
             handle = null
@@ -158,7 +157,7 @@ private fun EmbeddedHarness(state: DshServer.Running, services: DshServices) {
                     modifier = Modifier.size(16.dp),
                 )
             }
-            IconButton(onClick = { services.openUrl(state.url, "DeepSeek Harness") }) {
+            IconButton(onClick = { services.openUrl(state.browserUrl, "DeepSeek Harness") }) {
                 Icon(
                     Icons.Outlined.OpenInBrowser,
                     contentDescription = "Open in browser tab",

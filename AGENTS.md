@@ -373,3 +373,12 @@ completes (`dsh_ask`), keys inject, and routes register into a real
 harness's own Models page, not on DeepSeek - there is still no DeepSeek key on the
 build machine, so `dsh_ask`'s DeepSeek-specific `MISSING_CREDENTIAL` remapping has
 only been exercised down its failure path.
+
+## 0.1.2-rc.1 pin review
+
+See [the compatibility review](docs/harness-0.1.2-rc.1.md) for source-reviewed
+changes and remaining live probes. In particular, the web readiness URL now
+contains a launch token: preserve it for HTTP readiness and browser navigation,
+keep it out of status/MCP text and `toString()`, and do not follow the token
+exchange's 303 during the readiness probe without its cookie. The older live
+probe provenance above has not been replaced by a claimed live run.

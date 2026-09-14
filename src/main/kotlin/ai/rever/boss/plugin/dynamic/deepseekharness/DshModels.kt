@@ -95,8 +95,14 @@ object DshNode {
 sealed interface DshServer {
     data object Stopped : DshServer
     data object Starting : DshServer
-    data class Running(val port: Int, val pid: Long) : DshServer {
+    // Not a data class: the launch URL contains a browser authentication token.
+    class Running(
+        val port: Int,
+        val pid: Long,
+        internal val browserUrl: String = "http://127.0.0.1:$port",
+    ) : DshServer {
         val url: String get() = "http://127.0.0.1:$port"
+        override fun toString(): String = "Running(port=$port, pid=$pid)"
     }
 
     data class Failed(val reason: String) : DshServer

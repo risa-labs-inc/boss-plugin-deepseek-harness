@@ -10,6 +10,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 
 /**
@@ -21,16 +22,15 @@ import java.net.URL
  * line to stdout:
  *
  * ```
- * dsh web: http://127.0.0.1:62375
+ * dsh web: http://127.0.0.1:62375/?token=<launch-token>
  * ```
  *
  * So the port is *read*, never guessed. The obvious alternative — bind a
  * `ServerSocket(0)`, close it, and pass the number along — has a race the OS can
  * lose between the close and the harness's bind, and the failure surfaces as a
  * bind error the user did nothing to cause. Reading the line has no race at all.
- * (Verified against `dsh 0.1.0-rc.7`; the harness's own webserver README states
- * the URL line belongs to the shell, which is what makes this a contract rather
- * than an implementation detail.)
+ * In 0.1.2-rc.1 the URL carries a browser launch token. Preserve it for
+ * readiness and navigation; only the clean origin belongs in diagnostics.
  *
  * ## Teardown
  *
@@ -173,11 +173,14 @@ class DshWebServer(
             }
             val line = runCatching { reader.readLine() }.getOrNull()
                 ?: return@withContext DshServer.Failed(failureText(transcript.toString()))
-            transcript.appendLine(line)
-
-            val port = parsePort(line) ?: continue
-            return@withContext if (awaitHttp(port, deadline)) {
-                DshServer.Running(port = port, pid = started.pid())
+            val browserUrl = parseBrowserUrl(line)
+            if (browserUrl == null) {
+                transcript.appendLine(line)
+                continue
+            }
+            val port = URI(browserUrl).port
+            return@withContext if (awaitHttp(browserUrl, deadline)) {
+                DshServer.Running(port = port, pid = started.pid(), browserUrl = browserUrl)
             } else {
                 DshServer.Failed("dsh reported port $port but never answered a request")
             }
@@ -185,23 +188,13 @@ class DshWebServer(
         DshServer.Failed("dsh web did not report a URL within ${STARTUP_TIMEOUT_MS / 1000}s")
     }
 
-    private suspend fun awaitHttp(port: Int, deadline: Long): Boolean {
+    private suspend fun awaitHttp(browserUrl: String, deadline: Long): Boolean {
         while (System.currentTimeMillis() < deadline) {
-            if (probe(port)) return true
+            if (probe(browserUrl)) return true
             delay(HTTP_POLL_MS)
         }
         return false
     }
-
-    private fun probe(port: Int): Boolean = runCatching {
-        val connection = URL("http://127.0.0.1:$port/").openConnection() as HttpURLConnection
-        connection.connectTimeout = PROBE_TIMEOUT_MS
-        connection.readTimeout = PROBE_TIMEOUT_MS
-        connection.requestMethod = "GET"
-        val code = connection.responseCode
-        connection.disconnect()
-        code in 200..399
-    }.getOrDefault(false)
 
     /** Reap a server left behind by an earlier load of this plugin. */
     private fun reapStaleLocked() {
@@ -227,12 +220,7 @@ class DshWebServer(
     private fun childPathForSpawn(): String = DshCli.childPath()
 
     companion object {
-        /**
-         * Matches the harness's readiness line, e.g.
-         * `dsh web: http://127.0.0.1:62375`. Anchored on the loopback host so a
-         * URL mentioned inside some other diagnostic cannot be mistaken for it.
-         */
-        private val URL_LINE = Regex("""http://127\.0\.0\.1:(\d{1,5})""")
+        private val URL_LINE = Regex("""^dsh web: (http://127\.0\.0\.1:[^\s]+)""")
 
         /** Enough of our own argv to tell our server from a recycled pid. */
         private const val STALE_COMMAND_MARKER = "--profile web"
@@ -258,10 +246,32 @@ class DshWebServer(
          * what it does to a real transcript is worth pinning.
          */
         internal fun failureText(transcript: String): String =
-            DshFailure.explain(transcript).ifBlank { "dsh web exited without output" }
+            DshFailure.explain(transcript.replace(Regex("""([?&]token=)[^\s&]+"""), "$1<redacted>")).ifBlank { "dsh web exited without output" }
 
-        /** The port from a readiness line, or null when the line is not one. */
-        internal fun parsePort(line: String): Int? =
-            URL_LINE.find(line)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it in 1..65535 }
+        /** Retain the launch token, accepting only the announced loopback root. */
+        internal fun parseBrowserUrl(line: String): String? {
+            val candidate = URL_LINE.find(line)?.groupValues?.get(1) ?: return null
+            val uri = runCatching { URI(candidate) }.getOrNull() ?: return null
+            return candidate.takeIf {
+                uri.scheme == "http" && uri.host == "127.0.0.1" && uri.userInfo == null &&
+                    uri.port in 1..65535 && uri.path in listOf("", "/") && uri.fragment == null
+            }
+        }
+
+        internal fun parsePort(line: String): Int? = parseBrowserUrl(line)?.let { URI(it).port }
+
+        /** A token exchange returns 303; following it without its cookie gives 401. */
+        internal fun probe(browserUrl: String): Boolean = runCatching {
+            val connection = URL(browserUrl).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = PROBE_TIMEOUT_MS
+                connection.readTimeout = PROBE_TIMEOUT_MS
+                connection.requestMethod = "GET"
+                connection.instanceFollowRedirects = false
+                connection.responseCode in 200..399
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrDefault(false)
     }
 }
