@@ -175,15 +175,16 @@ class DshWebServer(
                 ?: return@withContext DshServer.Failed(failureText(transcript.toString()))
             val browserUrl = parseBrowserUrl(line)
             if (browserUrl == null) {
-                // Readiness URLs carry a credential; never put them in failures.
-                if (!line.startsWith("dsh web: http")) transcript.appendLine(line)
+                // Retain diagnostics, including an unrecognized readiness shape,
+                // while removing launch credentials before recording them.
+                transcript.appendLine(safeDiagnostic(line))
                 continue
             }
             val port = URL(browserUrl).port
             return@withContext if (awaitHttp(browserUrl, deadline)) {
                 DshServer.Running(port = port, pid = started.pid(), browserUrl = browserUrl)
             } else {
-                DshServer.Failed("dsh reported port $port but never answered a request")
+                DshServer.Failed("dsh reported port $port but did not return a successful browser authentication response")
             }
         }
         DshServer.Failed("dsh web did not report a URL within ${STARTUP_TIMEOUT_MS / 1000}s")
@@ -223,8 +224,9 @@ class DshWebServer(
     companion object {
         /**
          * Matches the harness's readiness line, e.g.
-         * `dsh web: http://127.0.0.1:62375`. Anchored on the loopback host so a
-         * URL mentioned inside some other diagnostic cannot be mistaken for it.
+         * `dsh web: http://127.0.0.1:62375/?token=...` (0.1.5-rc.1).
+         * Require the readiness prefix, loopback root and the published base64url
+         * token format; diagnostic URLs must not become navigation targets.
          */
         private val URL_LINE = Regex("""^dsh web: (http://127\.0\.0\.1:[0-9]+(?:/\?token=[A-Za-z0-9_-]+|/)?)(?=\s|$)""")
 
@@ -253,6 +255,11 @@ class DshWebServer(
          */
         internal fun failureText(transcript: String): String =
             DshFailure.explain(transcript).ifBlank { "dsh web exited without output" }
+
+        private val TOKEN_QUERY = Regex("""([?&]token=)[^\s&#]*""")
+
+        internal fun safeDiagnostic(line: String): String =
+            TOKEN_QUERY.replace(line) { "${it.groupValues[1]}<redacted>" }
 
         /** Keep the launch token only for navigation; accept only the local root URL. */
         internal fun parseBrowserUrl(line: String): String? =

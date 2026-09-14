@@ -81,8 +81,13 @@ live BOSS session). `dsh-web-app` now prints a root URL with `?token=...`;
 `dsh-client-connection` exchanges it for a browser cookie with a 303 redirect,
 and the unauthenticated root returns 401. Keep that URL for browser navigation
 and explicit Copy URL, but use the clean origin for labels, tool responses and
-diagnostics. `DshServer.Running` is deliberately not a data class. The readiness
-probe must not follow the cookie redirect without a browser cookie jar.
+diagnostics. `DshServer.Running` is deliberately not a data class: credentials stay out of
+generated components/copy as well as diagnostics. Launch states are emitted once
+per process, so identity equality is appropriate; no repeated equal updates are
+produced. The readiness
+probe must not follow the cookie redirect without a browser cookie jar. The
+published `processLaunchToken` retains the token per root; `authorizeIndex`
+compares it without consuming or rotating it. A 401 is not authenticated readiness.
 `DshWebServerParseTest` exercises this exchange with a local HTTP fixture.
 
 Published sources retain web/headless bootstrap, top-level insert patches,
@@ -350,7 +355,7 @@ filter when answering a question about one setting.
 ## Testing
 
 ```bash
-./gradlew build   # 173 tests
+./gradlew build   # 177 tests
 ```
 
 Count results from `build/test-results/test/*.xml`, not from "BUILD SUCCESSFUL" -

@@ -320,7 +320,7 @@ class DshEngine(
         _busy.value = "Starting dsh web"
         return try {
             when (val outcome = server.start(ready.dsh, workspaceRoot(), childEnv(), overlay)) {
-                is DshServer.Running -> "dsh web is serving ${outcome.url} (pid ${outcome.pid})." + registerNote()
+                is DshServer.Running -> "dsh web is serving ${outcome.url} (pid ${outcome.pid}). Use dsh_open for authenticated access." + registerNote()
                 is DshServer.Failed -> "dsh web did not start: ${outcome.reason}"
                 else -> "dsh web is ${outcome::class.simpleName}."
             }

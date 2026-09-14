@@ -1,5 +1,9 @@
 package ai.rever.boss.plugin.dynamic.deepseekharness
 
+import com.sun.net.httpserver.HttpServer
+import java.net.InetSocketAddress
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -12,6 +16,8 @@ import kotlin.test.assertNull
  * ```
  * dsh web: http://127.0.0.1:62375
  * ```
+ *
+ * Published 0.1.5-rc.1 sources add `/?token=<base64url>` to that root URL.
  *
  * This is the whole reason the plugin does not pre-bind a port: reading what the
  * harness actually chose has no race, whereas binding a `ServerSocket(0)` and
@@ -63,7 +69,7 @@ class DshWebServerParseTest {
         val running = DshServer.Running(62375, 42, url)
         assertEquals(url, running.browserUrl)
         assertEquals("http://127.0.0.1:62375", running.url)
-        kotlin.test.assertFalse(running.toString().contains("test_launch"))
+        assertFalse(running.toString().contains("test_launch"))
     }
 
     @Test
@@ -72,13 +78,13 @@ class DshWebServerParseTest {
             "http://127.0.0.1:123456", "http://127.0.0.1:1234.evil.test",
             "http://127.0.0.1:1234@evil.test", "http://127.0.0.1:1234/other",
             "http://127.0.0.1:1234/?token=ok&redirect=evil",
-        )) assertNull(DshWebServer.parseBrowserUrl("dsh web: $url"))
+        )) assertNull(DshWebServer.parseBrowserUrl("dsh web: $url"), "Rejected URL: $url")
         assertNull(DshWebServer.parseBrowserUrl("error: see http://127.0.0.1:1234"))
     }
 
     @Test
     fun `readiness probe accepts token exchange without following cookie redirect`() {
-        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/") { exchange ->
             if (exchange.requestURI.rawQuery == "token=test_token") {
                 exchange.responseHeaders.add("Location", "/")
@@ -90,10 +96,22 @@ class DshWebServerParseTest {
         server.start()
         try {
             val url = "http://127.0.0.1:${server.address.port}/"
-            kotlin.test.assertFalse(DshWebServer.probe(url))
-            kotlin.test.assertTrue(DshWebServer.probe("${url}?token=test_token"))
+            assertFalse(DshWebServer.probe(url))
+            assertTrue(DshWebServer.probe("${url}?token=test_token"))
         } finally {
             server.stop(0)
         }
+    }
+
+    @Test
+    fun `unrecognized readiness retains diagnostics but redacts credentials`() {
+        val diagnostic = "dsh web: http server failed to bind: EADDRINUSE"
+        assertEquals(diagnostic, DshWebServer.safeDiagnostic(diagnostic))
+        val changedUrl = "dsh web: http://localhost:62375/?token=private.value==&extra=true"
+        val safe = DshWebServer.safeDiagnostic(changedUrl)
+        assertTrue(safe.contains("localhost:62375"))
+        assertTrue(safe.contains("<redacted>"))
+        assertFalse(DshWebServer.failureText(safe).contains("private.value"))
+        assertTrue(DshWebServer.failureText(safe).contains("localhost"))
     }
 }

@@ -84,7 +84,7 @@ class DshMcpToolProvider(
             handler = McpToolHandler {
                 McpToolResult(
                     when (val state = engine.server.state.value) {
-                        is DshServer.Running -> "Running on ${state.url} (pid ${state.pid})."
+                        is DshServer.Running -> "Running on ${state.url} (pid ${state.pid}). Use dsh_open for authenticated access."
                         is DshServer.Failed -> "Not running. Last attempt failed: ${state.reason}"
                         DshServer.Starting -> "Starting."
                         DshServer.Stopped -> "Stopped."
@@ -292,7 +292,7 @@ class DshMcpToolProvider(
                     .sorted().joinToString(", ").ifBlank { "none registered" }
         }
         lines += "server:  " + when (val s = engine.server.state.value) {
-            is DshServer.Running -> "running on ${s.url}"
+            is DshServer.Running -> "running on ${s.url}; use dsh_open for authenticated access"
             is DshServer.Failed -> "stopped; last failure: ${s.reason}"
             DshServer.Starting -> "starting"
             DshServer.Stopped -> "stopped"
