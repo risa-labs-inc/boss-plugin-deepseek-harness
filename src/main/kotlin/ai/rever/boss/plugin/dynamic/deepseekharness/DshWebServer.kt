@@ -173,11 +173,15 @@ class DshWebServer(
             }
             val line = runCatching { reader.readLine() }.getOrNull()
                 ?: return@withContext DshServer.Failed(failureText(transcript.toString()))
-            transcript.appendLine(line)
-
-            val port = parsePort(line) ?: continue
-            return@withContext if (awaitHttp(port, deadline)) {
-                DshServer.Running(port = port, pid = started.pid())
+            val browserUrl = parseBrowserUrl(line)
+            if (browserUrl == null) {
+                // Readiness URLs carry a credential; never put them in failures.
+                if (!line.startsWith("dsh web: http")) transcript.appendLine(line)
+                continue
+            }
+            val port = URL(browserUrl).port
+            return@withContext if (awaitHttp(browserUrl, deadline)) {
+                DshServer.Running(port = port, pid = started.pid(), browserUrl = browserUrl)
             } else {
                 DshServer.Failed("dsh reported port $port but never answered a request")
             }
@@ -185,23 +189,13 @@ class DshWebServer(
         DshServer.Failed("dsh web did not report a URL within ${STARTUP_TIMEOUT_MS / 1000}s")
     }
 
-    private suspend fun awaitHttp(port: Int, deadline: Long): Boolean {
+    private suspend fun awaitHttp(browserUrl: String, deadline: Long): Boolean {
         while (System.currentTimeMillis() < deadline) {
-            if (probe(port)) return true
+            if (probe(browserUrl)) return true
             delay(HTTP_POLL_MS)
         }
         return false
     }
-
-    private fun probe(port: Int): Boolean = runCatching {
-        val connection = URL("http://127.0.0.1:$port/").openConnection() as HttpURLConnection
-        connection.connectTimeout = PROBE_TIMEOUT_MS
-        connection.readTimeout = PROBE_TIMEOUT_MS
-        connection.requestMethod = "GET"
-        val code = connection.responseCode
-        connection.disconnect()
-        code in 200..399
-    }.getOrDefault(false)
 
     /** Reap a server left behind by an earlier load of this plugin. */
     private fun reapStaleLocked() {
@@ -232,7 +226,7 @@ class DshWebServer(
          * `dsh web: http://127.0.0.1:62375`. Anchored on the loopback host so a
          * URL mentioned inside some other diagnostic cannot be mistaken for it.
          */
-        private val URL_LINE = Regex("""http://127\.0\.0\.1:(\d{1,5})""")
+        private val URL_LINE = Regex("""^dsh web: (http://127\.0\.0\.1:[0-9]+(?:/\?token=[A-Za-z0-9_-]+|/)?)(?=\s|$)""")
 
         /** Enough of our own argv to tell our server from a recycled pid. */
         private const val STALE_COMMAND_MARKER = "--profile web"
@@ -260,8 +254,27 @@ class DshWebServer(
         internal fun failureText(transcript: String): String =
             DshFailure.explain(transcript).ifBlank { "dsh web exited without output" }
 
-        /** The port from a readiness line, or null when the line is not one. */
-        internal fun parsePort(line: String): Int? =
-            URL_LINE.find(line)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it in 1..65535 }
+        /** Keep the launch token only for navigation; accept only the local root URL. */
+        internal fun parseBrowserUrl(line: String): String? =
+            URL_LINE.find(line)?.groupValues?.get(1)?.takeIf {
+                runCatching { URL(it).port in 1..65535 }.getOrDefault(false)
+            }
+
+        internal fun parsePort(line: String): Int? = parseBrowserUrl(line)?.let { URL(it).port }
+
+        internal fun probe(browserUrl: String): Boolean = runCatching {
+            val connection = URL(browserUrl).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = PROBE_TIMEOUT_MS
+                connection.readTimeout = PROBE_TIMEOUT_MS
+                // The token exchange returns 303 + a cookie. This probe has no
+                // browser cookie jar; following it would turn success into 401.
+                connection.instanceFollowRedirects = false
+                connection.requestMethod = "GET"
+                connection.responseCode in 200..399
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrDefault(false)
     }
 }

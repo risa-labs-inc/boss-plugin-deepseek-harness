@@ -74,6 +74,24 @@ of these after a harness upgrade.
   `DshFailure` says so in the remedy, because a BOSS dialog naming a file the user
   never opened reads as BOSS having written it.
 
+## 0.1.5-rc.1 source compatibility review
+
+The pin upgrade was reviewed against the published npm package sources (not a
+live BOSS session). `dsh-web-app` now prints a root URL with `?token=...`;
+`dsh-client-connection` exchanges it for a browser cookie with a 303 redirect,
+and the unauthenticated root returns 401. Keep that URL for browser navigation
+and explicit Copy URL, but use the clean origin for labels, tool responses and
+diagnostics. `DshServer.Running` is deliberately not a data class. The readiness
+probe must not follow the cookie redirect without a browser cookie jar.
+`DshWebServerParseTest` exercises this exchange with a local HTTP fixture.
+
+Published sources retain web/headless bootstrap, top-level insert patches,
+`MISSING_CREDENTIAL`, environment credential precedence and the MCP bridge's
+streamable-http configuration. The pi-ai 0.85.1 catalog retains our twelve mapped
+provider ids. These source checks do not replace the live re-probe checklist in
+the pin PR: browser rendering, a real model turn and runtime provider resolution
+have not been exercised against 0.1.5-rc.1.
+
 ## Traps
 
 - **Never a bare command name.** `ProcessBuilder` resolves against the *parent*

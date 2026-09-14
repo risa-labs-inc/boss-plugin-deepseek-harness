@@ -55,4 +55,45 @@ class DshWebServerParseTest {
     fun `the first loopback port on the line wins`() {
         assertEquals(4321, DshWebServer.parsePort("dsh web: http://127.0.0.1:4321 (was http://127.0.0.1:1111)"))
     }
+
+    @Test
+    fun `authenticated readiness retains the token but diagnostics do not`() {
+        val url = "http://127.0.0.1:62375/?token=test_launch-token_123"
+        assertEquals(url, DshWebServer.parseBrowserUrl("dsh web: $url (LAN: http://192.168.1.2:62375/?token=other)"))
+        val running = DshServer.Running(62375, 42, url)
+        assertEquals(url, running.browserUrl)
+        assertEquals("http://127.0.0.1:62375", running.url)
+        kotlin.test.assertFalse(running.toString().contains("test_launch"))
+    }
+
+    @Test
+    fun `readiness rejects diagnostic urls malformed ports and foreign authorities`() {
+        for (url in listOf(
+            "http://127.0.0.1:123456", "http://127.0.0.1:1234.evil.test",
+            "http://127.0.0.1:1234@evil.test", "http://127.0.0.1:1234/other",
+            "http://127.0.0.1:1234/?token=ok&redirect=evil",
+        )) assertNull(DshWebServer.parseBrowserUrl("dsh web: $url"))
+        assertNull(DshWebServer.parseBrowserUrl("error: see http://127.0.0.1:1234"))
+    }
+
+    @Test
+    fun `readiness probe accepts token exchange without following cookie redirect`() {
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/") { exchange ->
+            if (exchange.requestURI.rawQuery == "token=test_token") {
+                exchange.responseHeaders.add("Location", "/")
+                exchange.responseHeaders.add("Set-Cookie", "session=test; HttpOnly")
+                exchange.sendResponseHeaders(303, -1)
+            } else exchange.sendResponseHeaders(401, -1)
+            exchange.close()
+        }
+        server.start()
+        try {
+            val url = "http://127.0.0.1:${server.address.port}/"
+            kotlin.test.assertFalse(DshWebServer.probe(url))
+            kotlin.test.assertTrue(DshWebServer.probe("${url}?token=test_token"))
+        } finally {
+            server.stop(0)
+        }
+    }
 }

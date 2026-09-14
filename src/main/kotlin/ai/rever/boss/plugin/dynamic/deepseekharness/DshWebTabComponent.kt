@@ -115,7 +115,7 @@ private fun EmbeddedHarness(state: DshServer.Running, services: DshServices) {
             Spacer(Modifier.height(14.dp))
             BossPrimaryButton(
                 text = "Open in browser tab",
-                onClick = { services.openUrl(state.url, "DeepSeek Harness") },
+                onClick = { services.openUrl(state.browserUrl, "DeepSeek Harness") },
                 icon = Icons.Outlined.OpenInBrowser,
             )
         }
@@ -128,7 +128,7 @@ private fun EmbeddedHarness(state: DshServer.Running, services: DshServices) {
 
     LaunchedEffect(state.port) {
         handle?.dispose()
-        handle = browserService.createBrowser(BrowserConfig(url = state.url))
+        handle = browserService.createBrowser(BrowserConfig(url = state.browserUrl))
     }
 
     DisposableEffect(state.port) {
@@ -158,7 +158,7 @@ private fun EmbeddedHarness(state: DshServer.Running, services: DshServices) {
                     modifier = Modifier.size(16.dp),
                 )
             }
-            IconButton(onClick = { services.openUrl(state.url, "DeepSeek Harness") }) {
+            IconButton(onClick = { services.openUrl(state.browserUrl, "DeepSeek Harness") }) {
                 Icon(
                     Icons.Outlined.OpenInBrowser,
                     contentDescription = "Open in browser tab",
