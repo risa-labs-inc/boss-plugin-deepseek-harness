@@ -85,12 +85,15 @@ class DshEngine(
 
     // ---------------------------------------------------------------- refresh
 
-    /** Re-read every derived value. Cheap enough to run on panel open. */
+    /** Re-read install, profile, credential and model metadata on panel open.
+     * Modern inspection starts one Node helper for an initialized profile;
+     * a missing profile also needs the CLI's boot-free initialization step.
+     */
     suspend fun refreshAll() {
         refreshInstall()
         val ready = _install.value as? DshInstall.Ready
         secretSync.setProfileMetadata(
-            if (ready != null && registrar.usesProfileSettings(ready.version)) registrar.inspectProfile(ready.dsh, "web") else null,
+            if (ready != null && registrar.usesProfileSettings(ready.version)) registrar.inspectProfile(ready.dsh, "web", ready.resolvedNode) else null,
         )
         refreshProfiles()
         refreshKeySource()
@@ -127,14 +130,14 @@ class DshEngine(
         childEnvironment: Map<String, String?>,
     ): DshRegisterOutcome {
         val names = childEnvironment.filterValues { !it.isNullOrBlank() }.keys
-        val outcome = if (ready != null && registrar.usesProfileSettings(ready.version)) {
-            registrar.registerProfile(ready.dsh, profile, names, childEnvironment)
-        } else registrar.register(registrar.plan(names))
-        _lastRegister.value = outcome
+        val result = if (ready != null && registrar.usesProfileSettings(ready.version)) {
+            registrar.registerProfile(ready.dsh, profile, names, childEnvironment, resolvedNode = ready.resolvedNode)
+        } else DshProfileRegistration(registrar.register(registrar.plan(names)))
+        _lastRegister.value = result.outcome
         if (ready != null && registrar.usesProfileSettings(ready.version) && profile == "web") {
-            secretSync.setProfileMetadata(registrar.latestProfileMetadata)
+            secretSync.setProfileMetadata(result.metadata)
         }
-        return outcome
+        return result.outcome
     }
 
     private fun registrationFailure(version: String, outcome: DshRegisterOutcome): String? {
@@ -249,7 +252,7 @@ class DshEngine(
         }
         val probe = DshCli.exec(listOf(dsh.absolutePath, "--version"), timeoutSeconds = VERSION_TIMEOUT)
         _install.value = if (probe.ok) {
-            DshInstall.Ready(dsh, probe.stdout.trim().ifBlank { "unknown" })
+            DshInstall.Ready(dsh, probe.stdout.trim().ifBlank { "unknown" }, node)
         } else {
             // The binary is on disk but will not answer. Treat it as missing
             // rather than Ready-with-a-bad-version: every later call would fail
@@ -457,7 +460,11 @@ class DshEngine(
             add(flag)
         }
         val exec = DshCli.exec(argv, extraEnv = environment, timeoutSeconds = DUMP_TIMEOUT)
-        if (!exec.ok) return exec.message to true
+        if (!exec.ok) return when {
+            exec.timedOut -> "Composing the harness profile timed out; retry after the installation finishes."
+            exec.missing -> "The harness executable is unavailable; refresh its installation."
+            else -> DshFailure.configurationFailure(exec.stdout + "\n" + exec.stderr)
+        } to true
         val dump = exec.stdout.trim()
         val filtered = row?.trim()?.takeIf { it.isNotEmpty() }?.let { selectRow(dump, it) }
             ?: return dump to false

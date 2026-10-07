@@ -99,6 +99,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ needs.resolve.outputs.floor }}
@@ -136,6 +138,25 @@ jobs:
           echo "$DSH --version -> $REPORTED"
           [ "$REPORTED" = "${{ needs.resolve.outputs.candidate }}" ] || {
             echo "::error::asked for ${{ needs.resolve.outputs.candidate }}, got $REPORTED"; exit 1; }
+
+      - name: Resolve the installed candidate package for compatibility fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { existsSync } from "node:fs";
+            import { resolve } from "node:path";
+            const root = ["toolchain/lib/node_modules/@deepseek-ai/dsh", "toolchain/node_modules/@deepseek-ai/dsh"]
+              .map(path => resolve(path)).find(path => existsSync(`${path}/package.json`));
+            if (!root) process.exit(1);
+            process.stdout.write(`DSH_TEST_PACKAGE_ROOT=${root}\n`);
+          ' >> "$GITHUB_ENV"
+
+      - name: Candidate must preserve profile migration and native Models editability
+        shell: bash
+        run: node --test src/test/resources/dsh-profile-update.test.mjs
+        env:
+          DSH_TEST_REQUIRE_PACKAGE: 'true'
 
   bump:
     needs: [resolve, verify]
@@ -185,19 +206,28 @@ jobs:
             Verified before this PR was opened: installed into a private prefix on
             ubuntu, macOS and Windows, on Node `${{ needs.resolve.outputs.floor }}`
             (the floor `DshNode.MIN_VERSION` declares), and the installed binary
-            reported the expected version on all three.
+            reported the expected version on all three. The packaged profile
+            helper fixtures also passed against the candidate on all three:
+            migration across web/headless, preserved settings/comments/tags,
+            native Models editability, read-only inspection, safe refusals,
+            private backups, and rollback after a failed migration marker write.
 
             **What CI could not check.** Everything in AGENTS.md under "Verified
             facts about the harness" was probed by hand against a specific release,
             and this bump invalidates that provenance. Before merging, re-probe at
             least:
 
-            - [ ] `dsh web` still prints one `dsh web: http://127.0.0.1:PORT` line
+            - [ ] `dsh web --no-open --port 0` still prints one complete loopback
+                  URL; its authentication query, cookie exchange and clean URL
+                  work with the plugin's readiness and navigation paths
             - [ ] `MISSING_CREDENTIAL` still appears in the no-key failure text
             - [ ] `web` and `headless` still self-initialize with no pnpm
             - [ ] a patch layer is still a top-level array (`- insert:`)
             - [ ] the provider routes in `DshProviderRegistrar.VERIFIED_ROUTES`
                   still resolve, and the ones in `KNOWN_ABSENT_ROUTES` still do not
+            - [ ] the installed parser/composition/atomic-write APIs still match
+                  the profile helper, and native Models changes remain editable
+                  after registration and legacy web-to-headless migration
 
-            A green run here means it installs and runs. It does not mean the
-            plugin's assumptions about its behaviour still hold.
+            A green run proves installation and the checked profile protocol.
+            Re-probe the remaining runtime contracts above before merging.

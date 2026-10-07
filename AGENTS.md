@@ -253,8 +253,9 @@ helper updates the profile-owned patch, so native controls remain editable. Home
 patch overrides remain authoritative. The BOSS MCP overlay is independent and
 still passed through `--patch`.
 
-The helper writes private backups and migration markers with owner-only access;
-its temporary script is also private and removed after completion. Its output
+The helper writes private backups and migration markers. POSIX owner-only modes
+are enforced; Windows retains the user directory's inherited ACL and applies JDK
+permission flags as best-effort hints. Its temporary script is removed after completion. Its output
 contains fixed status, route names, the selected model label, and environment
 variable references only. Never return raw Node exceptions or composed YAML to
 the panel because configuration can contain credentials.
@@ -263,6 +264,19 @@ the panel because configuration can contain credentials.
 backup, or migration marker. Refresh uses this for CLI 0.2 so the doctor and key
 panel report current Models-page choices after the global settings file has been
 archived. Returning to CLI 0.1 restores the legacy metadata reader.
+An initialized profile needs only the inspection helper; it skips the extra CLI
+config-composition process. A missing profile first uses boot-free initialization.
+
+The regular PR workflow runs `src/test/resources/dsh-profile-update.test.mjs`
+against the exact pinned CLI on macOS, Linux, and Windows with Node 22.19.0. The
+harness-bump workflow runs those fixtures against its installed candidate too.
+Locally, set `DSH_TEST_PACKAGE_ROOT` to the isolated installed package directory
+and `DSH_TEST_REQUIRE_PACKAGE=true`, then run
+`node --test src/test/resources/dsh-profile-update.test.mjs` using Node 22.19.0.
+The Kotlin route-parity tests also compare the packaged helper's allowlist and
+canonical credential preferences against the registrar's tables. Changing the
+Kotlin `OPENAI_KEY` mapping to a different valid route compiled and failed the
+named allowlist parity test; restoring it passed the focused suite.
 
 ### The BOSS MCP bridge: ports and both launch paths
 
@@ -365,19 +379,25 @@ filter when answering a question about one setting.
 ## Testing
 
 ```bash
-./gradlew build   # 173 tests
+./gradlew build   # 200 JVM tests
 ```
 
 Count results from `build/test-results/test/*.xml`, not from "BUILD SUCCESSFUL" -
 a `test` task with no sources is NO-SOURCE and passes.
 
-Both central guards have been shown to fail against a real mutation:
+The regression guards have been shown to fail against real mutations:
 
 - dropping `dsh_ask`'s permission fails 2 tests in `DshMcpToolRbacTest`
 - switching the overlay to the bare-id override form fails
   `DshBridgeOverlayTest`
 - removing the modern profile-preservation launch guard fails
   `DshProfileLaunchGuardTest` before an unverified vendor/default can run
+- probing the bare web URL instead of the authenticated URL fails
+  `DshWebAuthenticationTest`
+- changing Kotlin's `OPENAI_KEY` route to another valid route fails the allowlist
+  test in `DshProviderRouteParityTest`
+- returning raw failed config-dump output fails the diagnostic test in
+  `DshProfileLaunchGuardTest`
 - reverting `DshNodeResolver` to first-match fails 6 of 10 in
   `DshNodeResolverTest`
 - pointing the Install button back at `setPendingSidebarCommand` fails

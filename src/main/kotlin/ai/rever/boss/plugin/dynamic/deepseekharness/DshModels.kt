@@ -36,7 +36,10 @@ sealed interface DshInstall {
     data class DshMissing(val node: File) : DshInstall
 
     /** Ready to run. [version] is whatever `dsh --version` printed. */
-    data class Ready(val dsh: File, val version: String) : DshInstall
+    data class Ready(val dsh: File, val version: String, internal val resolvedNode: File?) : DshInstall {
+        /** Retain the original constructor; refreshed snapshots also carry their chosen runtime. */
+        constructor(dsh: File, version: String) : this(dsh, version, null)
+    }
 
     val ready: Boolean get() = this is Ready
 }

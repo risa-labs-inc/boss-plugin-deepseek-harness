@@ -36,6 +36,26 @@ package ai.rever.boss.plugin.dynamic.deepseekharness
  */
 object DshFailure {
 
+    /** Config dumps can quote credentials; expose only recognized, fixed remedies. */
+    internal fun configurationFailure(output: String): String {
+        if (output.contains(DshCredentials.MISSING_MARKER)) return MISSING_KEY
+        if (PROVIDER in output) {
+            if (MODE_RULE.containsMatchIn(output)) {
+                return "The harness credentials file is readable beyond its owner. Restrict access to " +
+                    "your .credentials.yaml file before retrying. " + OWNERSHIP
+            }
+            if (listOf(VALUE_RULE, MAPPING_RULE, DOCUMENT_RULE).any { it.containsMatchIn(output) }) {
+                val key = VALUE_RULE.find(output)?.groupValues?.get(1)
+                    ?.takeIf { Regex("[A-Za-z_][A-Za-z0-9_]*").matches(it) }
+                val remedy = if (key != null) "Quote the value for \"$key\", or delete that line. "
+                    else "Quote every value and remove anything that is not a credential. "
+                return "The harness .credentials.yaml file is invalid. " + remedy +
+                    "It must contain one NAME: \"value\" per line. " + OWNERSHIP
+            }
+        }
+        return "The harness could not compose this profile safely. Check its profile configuration and retry."
+    }
+
     /**
      * What to say when no key resolved.
      *

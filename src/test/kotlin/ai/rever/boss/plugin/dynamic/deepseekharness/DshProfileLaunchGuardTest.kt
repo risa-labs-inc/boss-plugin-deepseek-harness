@@ -8,6 +8,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.junit.Assume.assumeTrue
 
 class DshProfileLaunchGuardTest {
     private val home = Files.createTempDirectory("dsh-profile-launch-guard").toFile()
@@ -23,7 +24,7 @@ class DshProfileLaunchGuardTest {
         val field = DshEngine::class.java.getDeclaredField("_install").apply { isAccessible = true }
         @Suppress("UNCHECKED_CAST")
         val install = field.get(engine) as MutableStateFlow<DshInstall>
-        install.value = DshInstall.Ready(dsh, "0.2.0-rc.2")
+        install.value = DshInstall.Ready(dsh, "0.2.0-rc.2", File(home, "resolved-node"))
         return engine
     }
 
@@ -45,5 +46,15 @@ class DshProfileLaunchGuardTest {
         assertTrue(message.contains("provider settings could not be preserved safely"))
         assertFalse(marker.exists(), "a server started with unverified settings")
         assertTrue(engine.server.state.value is DshServer.Stopped)
+    }
+
+    @Test
+    fun `failed diagnostic config dumps do not expose parser contents`() = runTest {
+        assumeTrue(Files.isExecutable(java.nio.file.Path.of("/bin/sh")))
+        dsh.writeText("#!/bin/sh\nprintf '%s\\n' 'Error: apiKey: private-credential-value' >&2\nexit 1\n")
+        val (message, failed) = engine().dumpConfig("web", defaultsOnly = true)
+        assertTrue(failed)
+        assertTrue(message.contains("profile configuration"))
+        assertFalse(message.contains("private-credential-value"))
     }
 }

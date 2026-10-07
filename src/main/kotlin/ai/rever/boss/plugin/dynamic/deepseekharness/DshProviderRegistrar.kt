@@ -31,6 +31,12 @@ sealed interface DshRegisterOutcome {
     data class Failed(val reason: String) : DshRegisterOutcome
 }
 
+/** Results belong to one invocation; concurrent web/headless work cannot exchange metadata. */
+internal data class DshProfileRegistration(
+    val outcome: DshRegisterOutcome,
+    val metadata: DshHarnessMetadata? = null,
+)
+
 /**
  * Registering provider routes in the harness's own `settings.yaml`.
  *
@@ -71,23 +77,25 @@ sealed interface DshRegisterOutcome {
  */
 class DshProviderRegistrar(
     private val env: Map<String, String> = System.getenv(),
-    private val nodeResolver: () -> File? = { DshCli.which("node") },
+    private val nodeResolver: suspend () -> File? = {
+        when (val resolution = DshNodeResolver.resolve(DshCli.whichAll("node")) { candidate ->
+            val version = DshCli.exec(listOf(candidate.absolutePath, "--version"), timeoutSeconds = 5)
+            version.stdout.takeIf { version.ok }
+        }) {
+            is DshNodeResolver.Resolution.Usable -> resolution.node
+            else -> null
+        }
+    },
     private val runCommand: suspend (List<String>, Map<String, String?>) -> DshExec = { argv, childEnv ->
-        DshCli.exec(argv, extraEnv = childEnv, timeoutSeconds = 30)
+        DshCli.exec(argv, extraEnv = childEnv, timeoutSeconds = 120)
     },
     private val helperSource: () -> String? = {
         DshProviderRegistrar::class.java.getResourceAsStream("/META-INF/boss-plugin/dsh-profile-update.mjs")
             ?.bufferedReader()?.use { it.readText() }
     },
 ) {
-    var latestProfileMetadata: DshHarnessMetadata? = null
-        private set
-
-    internal suspend fun inspectProfile(dsh: File, profile: String): DshHarnessMetadata? {
-        registerProfile(dsh, profile, emptySet(), emptyMap(), inspectOnly = true)
-        return latestProfileMetadata
-    }
-
+    internal suspend fun inspectProfile(dsh: File, profile: String, resolvedNode: File? = null): DshHarnessMetadata? =
+        registerProfile(dsh, profile, emptySet(), emptyMap(), inspectOnly = true, resolvedNode = resolvedNode).metadata
 
     private val settingsFile: File get() = File(DshPaths.home(env), "settings.yaml")
 
@@ -198,41 +206,56 @@ class DshProviderRegistrar(
         envNames: Set<String>,
         childEnvironment: Map<String, String?>,
         inspectOnly: Boolean = false,
-    ): DshRegisterOutcome {
-        latestProfileMetadata = null
-        val node = nodeResolver() ?: return DshRegisterOutcome.Failed("Node is unavailable for profile configuration")
-        val packageRoot = packageRoot(dsh)
-            ?: return DshRegisterOutcome.Failed("the installed harness package could not be located for profile configuration")
-        val source = helperSource()
-            ?: return DshRegisterOutcome.Failed("the profile configuration helper is unavailable")
-        val environment = childEnvironment + (DshPaths.HOME_ENV to DshPaths.home(env).absolutePath)
-        // Initialization is boot-free. The native settings importer and an AI
-        // turn must not run before the profile's selected vendor is preserved.
-        val probe = runCommand(listOf(dsh.absolutePath, "--profile", profile, "--dump-config"), environment)
-        if (!probe.ok) return DshRegisterOutcome.Failed("the harness could not compose this profile safely")
+        resolvedNode: File? = null,
+    ): DshProfileRegistration {
+        fun failure(reason: String) = DshProfileRegistration(DshRegisterOutcome.Failed(reason))
         var helper: File? = null
         return try {
+            // The engine carries the exact runtime chosen by refreshInstall. The
+            // fallback remains version-aware for direct calls and old Ready objects.
+            val node = resolvedNode ?: nodeResolver()
+                ?: return failure("Node is unavailable for profile configuration")
+            val packageRoot = packageRoot(dsh)
+                ?: return failure("the installed harness package could not be located for profile configuration")
+            val source = helperSource() ?: return failure("the profile configuration helper is unavailable")
+            val environment = childEnvironment + (DshPaths.HOME_ENV to DshPaths.home(env).absolutePath)
+            val initialized = File(DshPaths.profileDir(profile, env), "package.json").isFile
+            if (!inspectOnly || !initialized) {
+                // Initialize through the CLI's boot-free path only when needed;
+                // ordinary inspection of an existing profile starts one helper.
+                val probe = runCommand(listOf(dsh.absolutePath, "--profile", profile, "--dump-config"), environment)
+                if (!probe.ok) return failure(when {
+                    probe.timedOut -> "composing the harness profile timed out; retry after the installation finishes"
+                    probe.missing -> "the harness executable is unavailable; refresh its installation"
+                    else -> DshFailure.configurationFailure(probe.stdout + "\n" + probe.stderr)
+                })
+            }
             val directory = DshPaths.overlayDir(env).toPath()
             Files.createDirectories(directory)
             restrictPermissions(directory.toFile(), "rwx------")
             helper = Files.createTempFile(directory, "boss-profile-update-", ".mjs").toFile()
             restrictPermissions(helper, "rw-------")
             helper.writeText(source)
+            // DSH_HOME and arbitrary selected secrets never become provider routes.
             val names = envNames.filter { it in ROUTE_FOR_ENV }.sorted().joinToString(",")
             val result = runCommand(
                 listOf(node.absolutePath, helper.absolutePath, packageRoot.absolutePath,
                     DshPaths.home(env).absolutePath, profile, names) + if (inspectOnly) listOf("--inspect") else emptyList(),
                 environment,
             )
-            if (!result.ok) DshRegisterOutcome.Failed("the harness profile could not be updated safely")
+            if (!result.ok) failure(when {
+                result.timedOut -> "updating the harness profile timed out; retry after the installation finishes"
+                result.missing -> "the selected Node runtime is unavailable; refresh the harness installation"
+                else -> "the harness profile could not be updated safely"
+            })
             else {
-                latestProfileMetadata = parseProfileMetadata(result.stdout)
-                parseProfileOutcome(result.stdout)
+                val outcome = parseProfileOutcome(result.stdout)
+                DshProfileRegistration(outcome, if (outcome is DshRegisterOutcome.Failed) null else parseProfileMetadata(result.stdout))
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
-            DshRegisterOutcome.Failed("the harness profile could not be updated safely")
+            failure("the harness profile could not be updated safely")
         } finally {
             helper?.delete()
         }
@@ -290,9 +313,22 @@ class DshProviderRegistrar(
         if (Files.getFileStore(file.toPath()).supportsFileAttributeView("posix")) {
             Files.setPosixFilePermissions(file.toPath(), PosixFilePermissions.fromString(permissions))
         } else {
-            check(file.setReadable(false, false) && file.setReadable(true, true))
-            check(file.setWritable(false, false) && file.setWritable(true, true))
+            bestEffortNonPosixPermissions(file)
         }
+    }
+
+    /** Windows cannot revoke read permission through File.setReadable(false).
+     * Keep its inherited user-directory ACL and attempt JDK flags without blocking launch.
+     */
+    internal fun bestEffortNonPosixPermissions(
+        file: File,
+        readable: (File, Boolean, Boolean) -> Boolean = { target, enabled, ownerOnly -> target.setReadable(enabled, ownerOnly) },
+        writable: (File, Boolean, Boolean) -> Boolean = { target, enabled, ownerOnly -> target.setWritable(enabled, ownerOnly) },
+    ) {
+        runCatching { readable(file, false, false) }
+        runCatching { readable(file, true, true) }
+        runCatching { writable(file, false, false) }
+        runCatching { writable(file, true, true) }
     }
 
     internal fun usesProfileSettings(version: String): Boolean {

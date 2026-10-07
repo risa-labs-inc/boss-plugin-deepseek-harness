@@ -15,6 +15,9 @@ import { spawn } from 'node:child_process';
 import { isDeepStrictEqual } from 'node:util';
 
 const packageRoot = process.env.DSH_TEST_PACKAGE_ROOT;
+if (process.env.DSH_TEST_REQUIRE_PACKAGE === 'true' && !packageRoot) {
+  throw new Error('DSH_TEST_PACKAGE_ROOT is required for the CI compatibility check');
+}
 const helper = resolve(dirname(fileURLToPath(import.meta.url)), '../../main/resources/META-INF/boss-plugin/dsh-profile-update.mjs');
 const enabled = { skip: !packageRoot };
 const require = packageRoot ? createRequire(join(packageRoot, 'package.json')) : null;
@@ -37,7 +40,9 @@ function invoke(home, profile = 'headless', names = 'OPENAI_API_KEY', inspect = 
     const child = spawn(process.execPath, args, {
       env: { PATH: dirname(process.execPath), HOME: home, DSH_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'],
     });
-    const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);
+    // Cold Windows file scanning can delay dependency imports. Keep a bounded
+    // budget without treating that startup delay as a compatibility failure.
+    const timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
     let stdout = '', stderr = '';
     child.stdout.on('data', chunk => { stdout += chunk; });
     child.stderr.on('data', chunk => { stderr += chunk; });
@@ -174,7 +179,8 @@ test('marker commit failure restores the previous profile and leaves migration r
   const fault = join(home, 'rename-fault.mjs');
   await writeFile(fault, `import {createRequire,syncBuiltinESMExports} from 'node:module';
 const fs=createRequire(import.meta.url)('node:fs/promises');const rename=fs.rename;
-fs.rename=async(from,to)=>{if(to.endsWith('/headless.json'))throw new Error('private-failure');return rename(from,to)};
+const {basename}=await import('node:path');
+fs.rename=async(from,to)=>{if(basename(to)==='headless.json')throw new Error('private-failure');return rename(from,to)};
 syncBuiltinESMExports();\n`);
   const result = await invoke(home, 'headless', 'OPENAI_API_KEY', false, fault);
   assert.equal(result.code, 1);

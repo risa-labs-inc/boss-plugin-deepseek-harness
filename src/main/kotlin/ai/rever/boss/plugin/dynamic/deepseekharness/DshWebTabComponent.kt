@@ -124,8 +124,7 @@ private fun EmbeddedHarness(state: DshServer.Running, services: DshServices) {
         return
     }
 
-    // Keyed on the port: a restarted server gets a new port, and a handle still
-    // pointed at the old one would show a dead page forever.
+    // A new process can reuse the port but have a different authentication session.
     var handle by remember(state.port, state.pid) { mutableStateOf<BrowserHandle?>(null) }
 
     LaunchedEffect(state.port, state.pid) {
