@@ -85,9 +85,16 @@ class DshEngine(
 
     // ---------------------------------------------------------------- refresh
 
-    /** Re-read every derived value. Cheap enough to run on panel open. */
+    /** Re-read install, profile, credential and model metadata on panel open.
+     * Modern inspection starts one Node helper for an initialized profile;
+     * a missing profile also needs the CLI's boot-free initialization step.
+     */
     suspend fun refreshAll() {
         refreshInstall()
+        val ready = _install.value as? DshInstall.Ready
+        secretSync.setProfileMetadata(
+            if (ready != null && registrar.usesProfileSettings(ready.version)) registrar.inspectProfile(ready.dsh, "web", ready.resolvedNode) else null,
+        )
         refreshProfiles()
         refreshKeySource()
         refreshKeyCandidates()
@@ -112,10 +119,40 @@ class DshEngine(
      * through to another. Idempotent, so the common case touches no file.
      */
     suspend fun syncProviders(): DshRegisterOutcome {
-        val names = secretSync.namesFor(_keySelection.value, credentials.suppliedNames())
-        val outcome = registrar.register(registrar.plan(names))
-        _lastRegister.value = outcome
-        return outcome
+        val ready = _install.value as? DshInstall.Ready
+        return syncProfileProviders(ready, "web", childEnv())
+    }
+
+    /** Modern registration uses the launch environment; the legacy selection contract stays unchanged. */
+    private suspend fun syncProfileProviders(
+        ready: DshInstall.Ready?,
+        profile: String,
+        childEnvironment: Map<String, String?>,
+    ): DshRegisterOutcome {
+        val result = if (ready != null && registrar.usesProfileSettings(ready.version)) {
+            val names = childEnvironment.filterValues { !it.isNullOrBlank() }.keys
+            registrar.registerProfile(ready.dsh, profile, names, childEnvironment, resolvedNode = ready.resolvedNode)
+        } else {
+            // On 0.1 the dedicated BOSS DeepSeek credential belongs to the
+            // bundled adapter, not a newly generated llm-pi-ai route.
+            val names = secretSync.namesFor(_keySelection.value, credentials.suppliedNames())
+            DshProfileRegistration(registrar.register(registrar.plan(names)))
+        }
+        _lastRegister.value = result.outcome
+        if (ready != null && registrar.usesProfileSettings(ready.version) && profile == "web") {
+            secretSync.setProfileMetadata(result.metadata)
+        }
+        return result.outcome
+    }
+
+    private fun registrationFailure(version: String, outcome: DshRegisterOutcome): String? {
+        if (!registrar.usesProfileSettings(version)) return null
+        val reason = when (outcome) {
+            is DshRegisterOutcome.Failed -> outcome.reason
+            is DshRegisterOutcome.TooComplex -> outcome.reason
+            else -> return null
+        }
+        return "DeepSeek Harness was not started because its configured provider settings could not be preserved safely: $reason."
     }
 
     /**
@@ -174,7 +211,7 @@ class DshEngine(
     private fun registerNote(): String = when (val r = _lastRegister.value) {
         is DshRegisterOutcome.TooComplex ->
             "\n\nNote: provider routes were not registered - ${r.reason}. Add this to " +
-                "$home/settings.yaml under `llm-pi-ai:` yourself:\n\n${r.manualYaml}"
+                "the harness Models page, preserving your existing provider options:\n\n${r.manualYaml}"
         is DshRegisterOutcome.Failed -> "\n\nNote: provider routes were not registered - ${r.reason}"
         else -> ""
     }
@@ -184,7 +221,7 @@ class DshEngine(
         // Only names that actually resolved are "supplied"; a name mapped to null
         // is a removal, and a ticked secret must be allowed to fill it.
         val supplied = provider.filterValues { it != null }.keys
-        return provider + secretSync.envFor(_keySelection.value, supplied)
+        return provider + secretSync.envFor(_keySelection.value, supplied) + (DshPaths.HOME_ENV to home.absolutePath)
     }
 
     suspend fun refreshInstall() {
@@ -220,7 +257,7 @@ class DshEngine(
         }
         val probe = DshCli.exec(listOf(dsh.absolutePath, "--version"), timeoutSeconds = VERSION_TIMEOUT)
         _install.value = if (probe.ok) {
-            DshInstall.Ready(dsh, probe.stdout.trim().ifBlank { "unknown" })
+            DshInstall.Ready(dsh, probe.stdout.trim().ifBlank { "unknown" }, node)
         } else {
             // The binary is on disk but will not answer. Treat it as missing
             // rather than Ready-with-a-bad-version: every later call would fail
@@ -315,11 +352,14 @@ class DshEngine(
     suspend fun startServer(): String {
         val ready = _install.value as? DshInstall.Ready
             ?: return "DeepSeek Harness is not installed. Open the DeepSeek Harness panel to install it."
-        val overlay = bridgeOverlay()
-        syncProviders()
-        _busy.value = "Starting dsh web"
+        _busy.value = "Preparing harness profile"
         return try {
-            when (val outcome = server.start(ready.dsh, workspaceRoot(), childEnv(), overlay)) {
+            val environment = childEnv()
+            val registration = syncProfileProviders(ready, "web", environment)
+            registrationFailure(ready.version, registration)?.let { return it }
+            val overlay = bridgeOverlay()
+            _busy.value = "Starting dsh web"
+            when (val outcome = server.start(ready.dsh, workspaceRoot(), environment, overlay)) {
                 is DshServer.Running -> "dsh web is serving ${outcome.url} (pid ${outcome.pid})." + registerNote()
                 is DshServer.Failed -> "dsh web did not start: ${outcome.reason}"
                 else -> "dsh web is ${outcome::class.simpleName}."
@@ -349,16 +389,19 @@ class DshEngine(
             ?: return "DeepSeek Harness is not installed on this machine." to true
 
         if (task.isBlank()) return "A task is required." to true
-        syncProviders()
+        val environment = childEnv()
+        val registration = syncProfileProviders(ready, "headless", environment)
+        registrationFailure(ready.version, registration)?.let { return it to true }
+        val overlay = bridgeOverlay()
 
         val exec = DshCli.exec(
             // The overlay has to reach this path too. It did not, and the
             // symptom was silent: the web UI could call BOSS tools while dsh_ask
             // reported having none, because only the server was passed --patch.
             // Launcher flags precede the app's, so --patch comes before the task.
-            argv = headlessArgv(ready.dsh, task, bridgeOverlay()),
+            argv = headlessArgv(ready.dsh, task, overlay),
             cwd = cwd,
-            extraEnv = childEnv(),
+            extraEnv = environment,
             timeoutSeconds = timeoutSeconds,
         )
 
@@ -413,6 +456,8 @@ class DshEngine(
         val ready = _install.value as? DshInstall.Ready
             ?: return "DeepSeek Harness is not installed." to true
         val flag = if (defaultsOnly) "--dump-default-config" else "--dump-config"
+        val environment = childEnv()
+        // A diagnostic dump does not mutate profile settings.
         val overlay = if (defaultsOnly) null else bridgeOverlay()
         val argv = buildList {
             add(ready.dsh.absolutePath)
@@ -420,8 +465,12 @@ class DshEngine(
             if (overlay != null) { add("--patch"); add(overlay.absolutePath) }
             add(flag)
         }
-        val exec = DshCli.exec(argv, timeoutSeconds = DUMP_TIMEOUT)
-        if (!exec.ok) return exec.message to true
+        val exec = DshCli.exec(argv, extraEnv = environment, timeoutSeconds = DUMP_TIMEOUT)
+        if (!exec.ok) return when {
+            exec.timedOut -> "Composing the harness profile timed out; retry after the installation finishes."
+            exec.missing -> "The harness executable is unavailable; refresh its installation."
+            else -> DshFailure.configurationFailure(exec.stdout + "\n" + exec.stderr)
+        } to true
         val dump = exec.stdout.trim()
         val filtered = row?.trim()?.takeIf { it.isNotEmpty() }?.let { selectRow(dump, it) }
             ?: return dump to false

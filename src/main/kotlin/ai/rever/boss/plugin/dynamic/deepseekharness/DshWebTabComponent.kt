@@ -115,23 +115,26 @@ private fun EmbeddedHarness(state: DshServer.Running, services: DshServices) {
             Spacer(Modifier.height(14.dp))
             BossPrimaryButton(
                 text = "Open in browser tab",
-                onClick = { services.openUrl(state.url, "DeepSeek Harness") },
+                onClick = {
+                    services.engine.server.navigationUrl(state)?.let { services.openUrl(it, "DeepSeek Harness") }
+                },
                 icon = Icons.Outlined.OpenInBrowser,
             )
         }
         return
     }
 
-    // Keyed on the port: a restarted server gets a new port, and a handle still
-    // pointed at the old one would show a dead page forever.
-    var handle by remember(state.port) { mutableStateOf<BrowserHandle?>(null) }
+    // A new process can reuse the port but have a different authentication session.
+    var handle by remember(state.port, state.pid) { mutableStateOf<BrowserHandle?>(null) }
 
-    LaunchedEffect(state.port) {
+    LaunchedEffect(state.port, state.pid) {
         handle?.dispose()
-        handle = browserService.createBrowser(BrowserConfig(url = state.url))
+        services.engine.server.navigationUrl(state)?.let { url ->
+            handle = browserService.createBrowser(BrowserConfig(url = url))
+        }
     }
 
-    DisposableEffect(state.port) {
+    DisposableEffect(state.port, state.pid) {
         onDispose {
             handle?.dispose()
             handle = null
@@ -158,7 +161,9 @@ private fun EmbeddedHarness(state: DshServer.Running, services: DshServices) {
                     modifier = Modifier.size(16.dp),
                 )
             }
-            IconButton(onClick = { services.openUrl(state.url, "DeepSeek Harness") }) {
+            IconButton(onClick = {
+                services.engine.server.navigationUrl(state)?.let { services.openUrl(it, "DeepSeek Harness") }
+            }) {
                 Icon(
                     Icons.Outlined.OpenInBrowser,
                     contentDescription = "Open in browser tab",

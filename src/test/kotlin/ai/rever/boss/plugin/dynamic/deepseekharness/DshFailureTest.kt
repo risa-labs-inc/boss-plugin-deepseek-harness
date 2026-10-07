@@ -22,6 +22,32 @@ import kotlin.test.assertTrue
 class DshFailureTest {
 
     @Test
+    fun `profile preflight retains actionable credential remedies without raw configuration`() {
+        val failure = DshFailure.configurationFailure(REPORTED + "\nprivate-api-key-value")
+        assertTrue(failure.contains("Quote the value for \"version\""))
+        assertTrue(failure.contains(".credentials.yaml"))
+        assertFalse(failure.contains("private-api-key-value"))
+        assertFalse(failure.contains("/Users/deepak"))
+    }
+
+    @Test
+    fun `unrecognized profile errors cannot expose configuration or session tokens`() {
+        val failure = DshFailure.configurationFailure("Error: apiKey: private-api-key-value token=private-token")
+        assertTrue(failure.contains("profile configuration"))
+        assertFalse(failure.contains("private-api-key-value"))
+        assertFalse(failure.contains("private-token"))
+    }
+
+    @Test
+    fun `profile credential ownership errors give a safe remedy`() {
+        val failure = DshFailure.configurationFailure(
+            "Error: credentials-local: /private-user/.credentials.yaml is readable beyond its owner",
+        )
+        assertTrue(failure.contains("Restrict access"))
+        assertFalse(failure.contains("/private-user"))
+    }
+
+    @Test
     fun `the reported transcript reduces to the line that names the cause`() {
         val explained = DshFailure.explain(REPORTED)
 

@@ -131,7 +131,9 @@ class DshPanelViewModel(private val services: DshServices) {
 
     fun copyUrl() {
         val running = server.value as? DshServer.Running ?: return
-        services.context.clipboardProvider?.setText(running.url)
+        val url = engine.server.navigationUrl(running) ?: return
+        services.context.clipboardProvider?.setText(url)
+        // Copy the authenticated URL while keeping its session token out of the toast.
         services.toastSuccess("Copied ${running.url}")
     }
 

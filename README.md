@@ -46,9 +46,10 @@ the harness's own web UI, and `dsh_*` MCP tools so in-terminal agents can drive 
 | `dsh_bundle_add` / `dsh_bundle_remove` | yes | `dsh.manage` |
 | `dsh_sessions` | no | - |
 
-Registering a provider route edits `$DSH_HOME/settings.yaml`, additively and
-with a backup, and refuses outright if the existing block holds options it cannot
-re-emit. It never changes your selected model.
+Registering a provider route adds missing environment-variable references with a
+backup. CLI 0.1 uses `$DSH_HOME/settings.yaml`; CLI 0.2 uses each profile's editable
+settings and preserves legacy configuration before launch. Existing options and
+your selected model stay intact. Unsafe configuration changes are refused.
 
 `dsh_ask` is gated because a harness turn spends model tokens and, under the
 harness's default `workspace-write` preset, can write files anywhere in the

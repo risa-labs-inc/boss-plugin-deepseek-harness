@@ -1,6 +1,9 @@
 package ai.rever.boss.plugin.dynamic.deepseekharness
 
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermissions
+import kotlinx.coroutines.CancellationException
 
 /** One provider route this plugin would add to the harness's settings. */
 data class DshRouteAddition(
@@ -28,15 +31,19 @@ sealed interface DshRegisterOutcome {
     data class Failed(val reason: String) : DshRegisterOutcome
 }
 
+/** Results belong to one invocation; concurrent web/headless work cannot exchange metadata. */
+internal data class DshProfileRegistration(
+    val outcome: DshRegisterOutcome,
+    val metadata: DshHarnessMetadata? = null,
+)
+
 /**
- * Registering provider routes in the harness's own `settings.yaml`.
+ * Registering provider routes through the installed harness's settings protocol.
  *
  * ## Why this is written so defensively
  *
- * This edits a file the user owns, with no YAML parser available - the host
- * bundles none, and pulling one in would round-trip the whole document through a
- * serializer that discards comments and reorders keys, which is a worse outcome
- * for a config file than a targeted edit.
+ * CLI 0.1 uses [register] to edit `settings.yaml` conservatively. The host has no
+ * YAML parser, so this path accepts only shapes it can round-trip exactly.
  *
  * So the rule is: **only write when the existing `llm-pi-ai` block can be
  * round-tripped exactly.** Their real file is
@@ -51,22 +58,47 @@ sealed interface DshRegisterOutcome {
  * did write is unrecoverable. Not timestamped: this runs on every launch, and a
  * directory filling with dated copies of a config file is its own problem.
  *
+ * CLI 0.2 uses [registerProfile] and the installed CLI's YAML AST, composition,
+ * file-lock and atomic-write libraries to update profile-owned `cordis.patch.yml`.
+ * This preserves comments, custom provider options and native Models editing.
+ * Legacy settings migrate once per profile before the first real turn. Unsafe
+ * shapes fail with a file-edit/backup remedy before the engine launches.
+ *
  * ## Route names are verified, never guessed
  *
  * A route name pi-ai does not ship registers **no adapter at all** and fails only
- * when a request reaches it - `NO_ADAPTER: no adapter registered for provider
- * "x"`. It does not fail at boot, so a wrong name is a silent misconfiguration
+ * when a request reaches it (`NO_ADAPTER` on 0.1; `INVALID_CONFIG` on 0.2).
+ * A wrong name is a silent misconfiguration
  * that surfaces later as a broken harness. [ROUTE_FOR_ENV] therefore maps only
  * names probed against a real `dsh` (see AGENTS.md), and an unmapped key is left
  * alone rather than guessed at.
  *
  * ## What it deliberately does not touch
  *
- * `agent-default-model`. Registering a provider is not the same as switching the
- * user's model, and a plugin that silently repointed the default would change
- * which vendor gets billed for the next turn.
+ * Adding a route never repoints `agent-default-model`. The modern path preserves
+ * the user's explicit model/vendor when carrying legacy settings into a profile.
  */
-class DshProviderRegistrar(private val env: Map<String, String> = System.getenv()) {
+class DshProviderRegistrar(
+    private val env: Map<String, String> = System.getenv(),
+    private val nodeResolver: suspend () -> File? = {
+        when (val resolution = DshNodeResolver.resolve(DshCli.whichAll("node")) { candidate ->
+            val version = DshCli.exec(listOf(candidate.absolutePath, "--version"), timeoutSeconds = 5)
+            version.stdout.takeIf { version.ok }
+        }) {
+            is DshNodeResolver.Resolution.Usable -> resolution.node
+            else -> null
+        }
+    },
+    private val runCommand: suspend (List<String>, Map<String, String?>) -> DshExec = { argv, childEnv ->
+        DshCli.exec(argv, extraEnv = childEnv, timeoutSeconds = 120)
+    },
+    private val helperSource: () -> String? = {
+        DshProviderRegistrar::class.java.getResourceAsStream("/META-INF/boss-plugin/dsh-profile-update.mjs")
+            ?.bufferedReader()?.use { it.readText() }
+    },
+) {
+    internal suspend fun inspectProfile(dsh: File, profile: String, resolvedNode: File? = null): DshHarnessMetadata? =
+        registerProfile(dsh, profile, emptySet(), emptyMap(), inspectOnly = true, resolvedNode = resolvedNode).metadata
 
     private val settingsFile: File get() = File(DshPaths.home(env), "settings.yaml")
 
@@ -163,6 +195,150 @@ class DshProviderRegistrar(private val env: Map<String, String> = System.getenv(
             file.writeText(updated)
             DshRegisterOutcome.Added(additions.map { it.route }, backup)
         }.getOrElse { DshRegisterOutcome.Failed(it.message ?: "could not write settings.yaml") }
+    }
+
+    /**
+     * The new CLI keeps editable settings in each profile's patch document. Let
+     * its installed YAML/patch libraries extend that document under the same
+     * lock, preserving comments, custom options and legacy defaults. A command-
+     * line config overlay would make native Models controls read-only.
+     */
+    internal suspend fun registerProfile(
+        dsh: File,
+        profile: String,
+        envNames: Set<String>,
+        childEnvironment: Map<String, String?>,
+        inspectOnly: Boolean = false,
+        resolvedNode: File? = null,
+    ): DshProfileRegistration {
+        fun failure(reason: String) = DshProfileRegistration(DshRegisterOutcome.Failed(reason))
+        var helper: File? = null
+        return try {
+            // The engine carries the exact runtime chosen by refreshInstall. The
+            // fallback remains version-aware for direct calls and old Ready objects.
+            val node = resolvedNode ?: nodeResolver()
+                ?: return failure("Node is unavailable for profile configuration")
+            val packageRoot = packageRoot(dsh)
+                ?: return failure("the installed harness package could not be located; point PATH at the actual npm-installed dsh executable instead of a wrapper shim, then refresh")
+            val source = helperSource() ?: return failure("the profile configuration helper is unavailable")
+            val environment = childEnvironment + (DshPaths.HOME_ENV to DshPaths.home(env).absolutePath)
+            val initialized = File(DshPaths.profileDir(profile, env), "package.json").isFile
+            if (!initialized) {
+                // Initialize through the CLI's boot-free path only when needed;
+                // ordinary inspection of an existing profile starts one helper.
+                val probe = runCommand(listOf(dsh.absolutePath, "--profile", profile, "--dump-config"), environment)
+                if (!probe.ok) return failure(when {
+                    probe.timedOut -> "composing the harness profile timed out; retry after the installation finishes"
+                    probe.missing -> "the harness executable is unavailable; refresh its installation"
+                    else -> DshFailure.configurationFailure(probe.stdout + "\n" + probe.stderr)
+                })
+            }
+            val directory = DshPaths.overlayDir(env).toPath()
+            Files.createDirectories(directory)
+            restrictPermissions(directory.toFile(), "rwx------")
+            helper = Files.createTempFile(directory, "boss-profile-update-", ".mjs").toFile()
+            restrictPermissions(helper, "rw-------")
+            helper.writeText(source)
+            // DSH_HOME and arbitrary selected secrets never become provider routes.
+            val names = envNames.filter { it in ROUTE_FOR_ENV }.sorted().joinToString(",")
+            val result = runCommand(
+                listOf(node.absolutePath, helper.absolutePath, packageRoot.absolutePath,
+                    DshPaths.home(env).absolutePath, profile, names) + if (inspectOnly) listOf("--inspect") else emptyList(),
+                environment,
+            )
+            if (!result.ok) failure(when {
+                result.timedOut -> "updating the harness profile timed out; retry after the installation finishes"
+                result.missing -> "the selected Node runtime is unavailable; refresh the harness installation"
+                else -> "the harness profile could not be updated safely"
+            })
+            else {
+                val outcome = parseProfileOutcome(result.stdout)
+                DshProfileRegistration(outcome, if (outcome is DshRegisterOutcome.Failed) null else parseProfileMetadata(result.stdout))
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            failure("the harness profile could not be updated safely")
+        } finally {
+            helper?.delete()
+        }
+    }
+
+    internal fun parseProfileOutcome(output: String): DshRegisterOutcome {
+        val fields = output.lineSequence().firstOrNull().orEmpty().trim().split('\t', limit = 2)
+        return when (fields.firstOrNull()) {
+            "UP_TO_DATE" -> DshRegisterOutcome.UpToDate
+            "ADDED" -> {
+                val routes = fields.getOrNull(1)?.split(',')?.filter { it.isNotBlank() }.orEmpty()
+                if (routes.any { it !in VERIFIED_ROUTES } || routes.distinct().size != routes.size) {
+                    DshRegisterOutcome.Failed("the profile helper returned an invalid registration result")
+                } else DshRegisterOutcome.Added(routes, null)
+            }
+            // Helper diagnostics are fixed metadata; never pass through raw Node
+            // stdout/stderr, which can quote a user's configuration or credential.
+            "REFUSED" -> DshRegisterOutcome.Failed("the profile has overrides that cannot be extended safely; edit the profile or home cordis.patch.yml, or restore the profile backup under boss-overlays/profile-migrations before retrying")
+            else -> DshRegisterOutcome.Failed("the harness profile could not be updated safely")
+        }
+    }
+
+    internal fun parseProfileMetadata(output: String): DshHarnessMetadata? {
+        val lines = output.lineSequence().toList()
+        if (lines.firstOrNull()?.substringBefore('\t') !in listOf("UP_TO_DATE", "ADDED")) return null
+        val models = lines.filter { it.startsWith("MODEL\t") }
+        val environments = lines.filter { it.startsWith("ENVS\t") }
+        if (models.size != 1 || environments.size != 1) return null
+        val fields = models.single().split('\t')
+        if (fields.size != 3 || fields.drop(1).any { text -> text.any(Char::isISOControl) }) return null
+        val names = environments.single().substringAfter('\t').split(',').filter { it.isNotBlank() }
+        if (names.any { !Regex("[A-Za-z_][A-Za-z0-9_]*").matches(it) }) return null
+        val model = when {
+            fields[1].isNotBlank() && fields[2].isNotBlank() -> "${fields[1]} / ${fields[2]}"
+            fields[1].isNotBlank() -> fields[1]
+            else -> null
+        }
+        return DshHarnessMetadata(model, names.toSet())
+    }
+
+    private fun packageRoot(dsh: File): File? {
+        val actual = runCatching { dsh.toPath().toRealPath().toFile() }.getOrDefault(dsh)
+        val candidates = generateSequence(actual.parentFile) { it.parentFile }.take(5).toList() +
+            listOf(File(dsh.parentFile, "node_modules/@deepseek-ai/dsh"),
+                File(dsh.parentFile, "../lib/node_modules/@deepseek-ai/dsh"))
+        return candidates.firstOrNull { root ->
+            val manifest = File(root, "package.json")
+            manifest.isFile && runCatching {
+                Regex("\"name\"\\s*:\\s*\"@deepseek-ai/dsh\"").containsMatchIn(manifest.readText())
+            }.getOrDefault(false)
+        }
+    }
+
+    private fun restrictPermissions(file: File, permissions: String) {
+        if (Files.getFileStore(file.toPath()).supportsFileAttributeView("posix")) {
+            Files.setPosixFilePermissions(file.toPath(), PosixFilePermissions.fromString(permissions))
+        } else {
+            bestEffortNonPosixPermissions(file)
+        }
+    }
+
+    /** Windows cannot revoke read permission through File.setReadable(false).
+     * Keep its inherited user-directory ACL and attempt JDK flags without blocking launch.
+     */
+    internal fun bestEffortNonPosixPermissions(
+        file: File,
+        readable: (File, Boolean, Boolean) -> Boolean = { target, enabled, ownerOnly -> target.setReadable(enabled, ownerOnly) },
+        writable: (File, Boolean, Boolean) -> Boolean = { target, enabled, ownerOnly -> target.setWritable(enabled, ownerOnly) },
+    ) {
+        runCatching { readable(file, false, false) }
+        runCatching { readable(file, true, true) }
+        runCatching { writable(file, false, false) }
+        runCatching { writable(file, true, true) }
+    }
+
+    internal fun usesProfileSettings(version: String): Boolean {
+        val parts = Regex("^(?:v)?(\\d+)\\.(\\d+)").find(version.trim()) ?: return true
+        val major = parts.groupValues[1].toIntOrNull() ?: return true
+        val minor = parts.groupValues[2].toIntOrNull() ?: return true
+        return major > 0 || minor >= 2
     }
 
     // ------------------------------------------------------------------ parsing
@@ -348,7 +524,9 @@ class DshProviderRegistrar(private val env: Map<String, String> = System.getenv(
         )
 
         /**
-         * Routes proved to exist against `dsh 0.1.0-rc.7`, and those proved not to.
+         * Routes proved against `dsh 0.1.0-rc.7` and re-probed on `0.2.0-rc.2`.
+         * Existing routes reach UNKNOWN_MODEL with a nonexistent model; absent
+         * routes report NO_ADAPTER on 0.1 and INVALID_CONFIG on 0.2.
          *
          * Kept as data so a test can assert every value in [ROUTE_FOR_ENV] is one
          * of the verified-present names, and that no known-absent name creeps in.

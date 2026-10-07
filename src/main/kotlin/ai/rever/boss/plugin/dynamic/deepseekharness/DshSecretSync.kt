@@ -4,6 +4,9 @@ import ai.rever.boss.plugin.api.PluginContext
 import ai.rever.boss.plugin.api.SecretEntryData
 import java.io.File
 
+/** Provider labels and credential references only; never credential values. */
+data class DshHarnessMetadata(val defaultModel: String?, val referencedEnvNames: Set<String>)
+
 /**
  * A BOSS secret the user can expose to the harness as an environment variable.
  *
@@ -103,6 +106,10 @@ class DshSecretSync(
     private val context: PluginContext,
     private val env: Map<String, String> = System.getenv(),
 ) {
+    @Volatile private var profileMetadata: DshHarnessMetadata? = null
+
+    fun setProfileMetadata(metadata: DshHarnessMetadata?) { profileMetadata = metadata }
+
 
     /**
      * Every secret whose username is shaped like an environment variable name,
@@ -162,6 +169,7 @@ class DshSecretSync(
      * the class doc.
      */
     fun harnessReferencedEnvNames(): Set<String> {
+        profileMetadata?.let { return it.referencedEnvNames }
         val text = settingsText() ?: return emptySet()
         return API_KEY_ENV.findAll(text).map { it.groupValues[1] }.toSet()
     }
@@ -175,6 +183,7 @@ class DshSecretSync(
      * "broken" and sends people hunting a fault that is not there.
      */
     fun harnessDefaultModel(): String? {
+        profileMetadata?.let { return it.defaultModel }
         val text = settingsText() ?: return null
         val block = DEFAULT_MODEL_BLOCK.find(text)?.value ?: return null
         val provider = field("provider").find(block)?.groupValues?.get(1)
