@@ -34,7 +34,7 @@ async function fixture(operation) {
 }
 function invoke(home, profile = 'headless', names = 'OPENAI_API_KEY', inspect = false, preload) {
   return new Promise((resolvePromise, reject) => {
-    const args = [...(preload ? ['--import', preload] : []), helper, packageRoot, home, profile, names,
+    const args = [...(preload ? ['--import', pathToFileURL(preload).href] : []), helper, packageRoot, home, profile, names,
       ...(inspect ? ['--inspect'] : [])];
     // No inherited provider credentials; the helper only needs installed files.
     const child = spawn(process.execPath, args, {
@@ -49,8 +49,10 @@ function invoke(home, profile = 'headless', names = 'OPENAI_API_KEY', inspect = 
     child.on('error', reject);
     child.on('close', code => {
       clearTimeout(timer);
-      assert.equal(stderr, '', 'never expose parser/config/exception contents');
-      resolvePromise({ code, stdout });
+      try {
+        assert.equal(stderr, '', 'never expose parser/config/exception contents');
+        resolvePromise({ code, stdout });
+      } catch (error) { reject(error); }
     });
   });
 }
