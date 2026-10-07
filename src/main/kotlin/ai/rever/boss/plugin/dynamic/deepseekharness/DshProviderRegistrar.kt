@@ -1,6 +1,9 @@
 package ai.rever.boss.plugin.dynamic.deepseekharness
 
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermissions
+import kotlinx.coroutines.CancellationException
 
 /** One provider route this plugin would add to the harness's settings. */
 data class DshRouteAddition(
@@ -66,7 +69,25 @@ sealed interface DshRegisterOutcome {
  * user's model, and a plugin that silently repointed the default would change
  * which vendor gets billed for the next turn.
  */
-class DshProviderRegistrar(private val env: Map<String, String> = System.getenv()) {
+class DshProviderRegistrar(
+    private val env: Map<String, String> = System.getenv(),
+    private val nodeResolver: () -> File? = { DshCli.which("node") },
+    private val runCommand: suspend (List<String>, Map<String, String?>) -> DshExec = { argv, childEnv ->
+        DshCli.exec(argv, extraEnv = childEnv, timeoutSeconds = 30)
+    },
+    private val helperSource: () -> String? = {
+        DshProviderRegistrar::class.java.getResourceAsStream("/META-INF/boss-plugin/dsh-profile-update.mjs")
+            ?.bufferedReader()?.use { it.readText() }
+    },
+) {
+    var latestProfileMetadata: DshHarnessMetadata? = null
+        private set
+
+    internal suspend fun inspectProfile(dsh: File, profile: String): DshHarnessMetadata? {
+        registerProfile(dsh, profile, emptySet(), emptyMap(), inspectOnly = true)
+        return latestProfileMetadata
+    }
+
 
     private val settingsFile: File get() = File(DshPaths.home(env), "settings.yaml")
 
@@ -163,6 +184,122 @@ class DshProviderRegistrar(private val env: Map<String, String> = System.getenv(
             file.writeText(updated)
             DshRegisterOutcome.Added(additions.map { it.route }, backup)
         }.getOrElse { DshRegisterOutcome.Failed(it.message ?: "could not write settings.yaml") }
+    }
+
+    /**
+     * The new CLI keeps editable settings in each profile's patch document. Let
+     * its installed YAML/patch libraries extend that document under the same
+     * lock, preserving comments, custom options and legacy defaults. A command-
+     * line config overlay would make native Models controls read-only.
+     */
+    internal suspend fun registerProfile(
+        dsh: File,
+        profile: String,
+        envNames: Set<String>,
+        childEnvironment: Map<String, String?>,
+        inspectOnly: Boolean = false,
+    ): DshRegisterOutcome {
+        latestProfileMetadata = null
+        val node = nodeResolver() ?: return DshRegisterOutcome.Failed("Node is unavailable for profile configuration")
+        val packageRoot = packageRoot(dsh)
+            ?: return DshRegisterOutcome.Failed("the installed harness package could not be located for profile configuration")
+        val source = helperSource()
+            ?: return DshRegisterOutcome.Failed("the profile configuration helper is unavailable")
+        val environment = childEnvironment + (DshPaths.HOME_ENV to DshPaths.home(env).absolutePath)
+        // Initialization is boot-free. The native settings importer and an AI
+        // turn must not run before the profile's selected vendor is preserved.
+        val probe = runCommand(listOf(dsh.absolutePath, "--profile", profile, "--dump-config"), environment)
+        if (!probe.ok) return DshRegisterOutcome.Failed("the harness could not compose this profile safely")
+        var helper: File? = null
+        return try {
+            val directory = DshPaths.overlayDir(env).toPath()
+            Files.createDirectories(directory)
+            restrictPermissions(directory.toFile(), "rwx------")
+            helper = Files.createTempFile(directory, "boss-profile-update-", ".mjs").toFile()
+            restrictPermissions(helper, "rw-------")
+            helper.writeText(source)
+            val names = envNames.filter { it in ROUTE_FOR_ENV }.sorted().joinToString(",")
+            val result = runCommand(
+                listOf(node.absolutePath, helper.absolutePath, packageRoot.absolutePath,
+                    DshPaths.home(env).absolutePath, profile, names) + if (inspectOnly) listOf("--inspect") else emptyList(),
+                environment,
+            )
+            if (!result.ok) DshRegisterOutcome.Failed("the harness profile could not be updated safely")
+            else {
+                latestProfileMetadata = parseProfileMetadata(result.stdout)
+                parseProfileOutcome(result.stdout)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            DshRegisterOutcome.Failed("the harness profile could not be updated safely")
+        } finally {
+            helper?.delete()
+        }
+    }
+
+    internal fun parseProfileOutcome(output: String): DshRegisterOutcome {
+        val fields = output.lineSequence().firstOrNull().orEmpty().trim().split('\t', limit = 2)
+        return when (fields.firstOrNull()) {
+            "UP_TO_DATE" -> DshRegisterOutcome.UpToDate
+            "ADDED" -> {
+                val routes = fields.getOrNull(1)?.split(',')?.filter { it.isNotBlank() }.orEmpty()
+                if (routes.any { it !in VERIFIED_ROUTES } || routes.distinct().size != routes.size) {
+                    DshRegisterOutcome.Failed("the profile helper returned an invalid registration result")
+                } else DshRegisterOutcome.Added(routes, null)
+            }
+            // Helper diagnostics are fixed metadata; never pass through raw Node
+            // stdout/stderr, which can quote a user's configuration or credential.
+            "REFUSED" -> DshRegisterOutcome.Failed("the profile has overrides that cannot be extended safely; configure routes in the harness Models page")
+            else -> DshRegisterOutcome.Failed("the harness profile could not be updated safely")
+        }
+    }
+
+    internal fun parseProfileMetadata(output: String): DshHarnessMetadata? {
+        val lines = output.lineSequence().toList()
+        if (lines.firstOrNull()?.substringBefore('\t') !in listOf("UP_TO_DATE", "ADDED")) return null
+        val models = lines.filter { it.startsWith("MODEL\t") }
+        val environments = lines.filter { it.startsWith("ENVS\t") }
+        if (models.size != 1 || environments.size != 1) return null
+        val fields = models.single().split('\t')
+        if (fields.size != 3 || fields.drop(1).any { text -> text.any(Char::isISOControl) }) return null
+        val names = environments.single().substringAfter('\t').split(',').filter { it.isNotBlank() }
+        if (names.any { !Regex("[A-Za-z_][A-Za-z0-9_]*").matches(it) }) return null
+        val model = when {
+            fields[1].isNotBlank() && fields[2].isNotBlank() -> "${fields[1]} / ${fields[2]}"
+            fields[1].isNotBlank() -> fields[1]
+            else -> null
+        }
+        return DshHarnessMetadata(model, names.toSet())
+    }
+
+    private fun packageRoot(dsh: File): File? {
+        val actual = runCatching { dsh.toPath().toRealPath().toFile() }.getOrDefault(dsh)
+        val candidates = generateSequence(actual.parentFile) { it.parentFile }.take(5).toList() +
+            listOf(File(dsh.parentFile, "node_modules/@deepseek-ai/dsh"),
+                File(dsh.parentFile, "../lib/node_modules/@deepseek-ai/dsh"))
+        return candidates.firstOrNull { root ->
+            val manifest = File(root, "package.json")
+            manifest.isFile && runCatching {
+                Regex("\"name\"\\s*:\\s*\"@deepseek-ai/dsh\"").containsMatchIn(manifest.readText())
+            }.getOrDefault(false)
+        }
+    }
+
+    private fun restrictPermissions(file: File, permissions: String) {
+        if (Files.getFileStore(file.toPath()).supportsFileAttributeView("posix")) {
+            Files.setPosixFilePermissions(file.toPath(), PosixFilePermissions.fromString(permissions))
+        } else {
+            check(file.setReadable(false, false) && file.setReadable(true, true))
+            check(file.setWritable(false, false) && file.setWritable(true, true))
+        }
+    }
+
+    internal fun usesProfileSettings(version: String): Boolean {
+        val parts = Regex("^(?:v)?(\\d+)\\.(\\d+)").find(version.trim()) ?: return true
+        val major = parts.groupValues[1].toIntOrNull() ?: return true
+        val minor = parts.groupValues[2].toIntOrNull() ?: return true
+        return major > 0 || minor >= 2
     }
 
     // ------------------------------------------------------------------ parsing

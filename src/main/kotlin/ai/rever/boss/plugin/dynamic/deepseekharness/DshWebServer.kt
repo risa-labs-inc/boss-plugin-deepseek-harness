@@ -10,6 +10,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 
 /**
@@ -21,16 +22,17 @@ import java.net.URL
  * line to stdout:
  *
  * ```
- * dsh web: http://127.0.0.1:62375
+ * dsh web: http://127.0.0.1:62375/?token=<session-token>
  * ```
  *
  * So the port is *read*, never guessed. The obvious alternative — bind a
  * `ServerSocket(0)`, close it, and pass the number along — has a race the OS can
  * lose between the close and the harness's bind, and the failure surfaces as a
  * bind error the user did nothing to cause. Reading the line has no race at all.
- * (Verified against `dsh 0.1.0-rc.7`; the harness's own webserver README states
- * the URL line belongs to the shell, which is what makes this a contract rather
- * than an implementation detail.)
+ * Verified against `dsh 0.2.0-rc.2`: the session query is required to enter the
+ * web UI. Older releases print a bare URL, which is accepted too. The complete
+ * URL is retained privately for navigation; observable state contains only the
+ * port and pid, so session tokens cannot leak into tool output or UI labels.
  *
  * ## Teardown
  *
@@ -48,6 +50,12 @@ class DshWebServer(
     private val env: Map<String, String> = System.getenv(),
 ) {
 
+    private var startupTimeoutMs: Long = STARTUP_TIMEOUT_MS
+
+    internal constructor(env: Map<String, String>, startupTimeoutMs: Long) : this(env) {
+        this.startupTimeoutMs = startupTimeoutMs
+    }
+
     private val _state = MutableStateFlow<DshServer>(DshServer.Stopped)
     val state: StateFlow<DshServer> = _state.asStateFlow()
 
@@ -56,6 +64,13 @@ class DshWebServer(
 
     private var process: Process? = null
     private var shutdownHook: Thread? = null
+
+    // The web session token belongs to navigation, never to UI state, tool output,
+    // diagnostics or a data class's generated toString().
+    @Volatile private var authenticatedUrl: String? = null
+
+    internal fun navigationUrl(running: DshServer.Running): String? =
+        authenticatedUrl?.takeIf { state.value == running }
 
     /** Recorded so a later plugin load can reap a server this one left running. */
     private val pidFile: File get() = File(DshPaths.overlayDir(env), "web-server.pid")
@@ -106,6 +121,7 @@ class DshWebServer(
     suspend fun stop() = lifecycle.withLock { stopLocked() }
 
     private fun stopLocked() {
+        authenticatedUrl = null
         process?.let { DshProcesses.terminate(it) }
         process = null
         shutdownHook?.let { hook -> runCatching { Runtime.getRuntime().removeShutdownHook(hook) } }
@@ -124,6 +140,7 @@ class DshWebServer(
      * what it holds.
      */
     fun disposeNow() {
+        authenticatedUrl = null
         process?.let { DshProcesses.terminate(it) }
         process = null
         shutdownHook?.let { hook -> runCatching { Runtime.getRuntime().removeShutdownHook(hook) } }
@@ -165,7 +182,7 @@ class DshWebServer(
     private suspend fun awaitReady(started: Process): DshServer = withContext(Dispatchers.IO) {
         val transcript = StringBuilder()
         val reader = started.inputStream.bufferedReader()
-        val deadline = System.currentTimeMillis() + STARTUP_TIMEOUT_MS
+        val deadline = System.currentTimeMillis() + startupTimeoutMs
 
         while (System.currentTimeMillis() < deadline) {
             if (!started.isAlive && !reader.ready()) {
@@ -175,29 +192,34 @@ class DshWebServer(
                 ?: return@withContext DshServer.Failed(failureText(transcript.toString()))
             transcript.appendLine(line)
 
-            val port = parsePort(line) ?: continue
-            return@withContext if (awaitHttp(port, deadline)) {
+            val url = parseUrl(line) ?: continue
+            val port = URI(url).port
+            return@withContext if (awaitHttp(url, deadline)) {
+                authenticatedUrl = url
                 DshServer.Running(port = port, pid = started.pid())
             } else {
                 DshServer.Failed("dsh reported port $port but never answered a request")
             }
         }
-        DshServer.Failed("dsh web did not report a URL within ${STARTUP_TIMEOUT_MS / 1000}s")
+        DshServer.Failed("dsh web did not report a URL within ${startupTimeoutMs / 1000}s")
     }
 
-    private suspend fun awaitHttp(port: Int, deadline: Long): Boolean {
+    private suspend fun awaitHttp(url: String, deadline: Long): Boolean {
         while (System.currentTimeMillis() < deadline) {
-            if (probe(port)) return true
+            if (probe(url)) return true
             delay(HTTP_POLL_MS)
         }
         return false
     }
 
-    private fun probe(port: Int): Boolean = runCatching {
-        val connection = URL("http://127.0.0.1:$port/").openConnection() as HttpURLConnection
+    private fun probe(url: String): Boolean = runCatching {
+        val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = PROBE_TIMEOUT_MS
         connection.readTimeout = PROBE_TIMEOUT_MS
         connection.requestMethod = "GET"
+        // A valid token redirects to the clean URL after setting a cookie. This
+        // probe has no cookie jar; following that redirect would return 401.
+        connection.instanceFollowRedirects = false
         val code = connection.responseCode
         connection.disconnect()
         code in 200..399
@@ -232,7 +254,8 @@ class DshWebServer(
          * `dsh web: http://127.0.0.1:62375`. Anchored on the loopback host so a
          * URL mentioned inside some other diagnostic cannot be mistaken for it.
          */
-        private val URL_LINE = Regex("""http://127\.0\.0\.1:(\d{1,5})""")
+        private val URL_LINE = Regex("""^dsh web:\s+(http://127\.0\.0\.1:\S+)""")
+        private val URL_QUERY = Regex("""(http://127\.0\.0\.1:\d+(?:/[^\s?]*)?)\?\S+""")
 
         /** Enough of our own argv to tell our server from a recycled pid. */
         private const val STALE_COMMAND_MARKER = "--profile web"
@@ -258,10 +281,20 @@ class DshWebServer(
          * what it does to a real transcript is worth pinning.
          */
         internal fun failureText(transcript: String): String =
-            DshFailure.explain(transcript).ifBlank { "dsh web exited without output" }
+            DshFailure.explain(URL_QUERY.replace(transcript, "$1")).ifBlank { "dsh web exited without output" }
+
+        /** Preserve the authentication query, accepting only an actual loopback readiness URL. */
+        internal fun parseUrl(line: String): String? {
+            val url = URL_LINE.find(line)?.groupValues?.get(1) ?: return null
+            val uri = runCatching { URI(url) }.getOrNull() ?: return null
+            return url.takeIf {
+                uri.scheme == "http" && uri.host == "127.0.0.1" &&
+                    uri.userInfo == null && uri.port in 1..65535 && uri.fragment == null
+            }
+        }
 
         /** The port from a readiness line, or null when the line is not one. */
         internal fun parsePort(line: String): Int? =
-            URL_LINE.find(line)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it in 1..65535 }
+            parseUrl(line)?.let { URI(it).port }
     }
 }

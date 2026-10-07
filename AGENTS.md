@@ -27,19 +27,26 @@ DshPaths           $DSH_HOME + the plugin's own npm prefix (pure - creates nothi
 DshNodeResolver    which of the machine's `node` binaries the harness runs on
 DshIcon            the DeepSeek whale, shared by the panel and the tab
 DshSecretSync      which BOSS secrets to inject, and the defaults
-DshProviderRegistrar  writes provider routes into the harness's settings.yaml
+DshProviderRegistrar  registers provider routes using the installed CLI settings protocol
 ```
 
 ## Verified facts about the harness
 
-Probed against `dsh 0.1.0-rc.7`, not read off docs. Re-probe before trusting any
-of these after a harness upgrade.
+The original probes used `dsh 0.1.0-rc.7`. The 0.2.0-rc.2 upgrade was re-probed
+with Node 22.19.0 in isolated homes: authenticated web startup, boot-free config
+composition, provider catalogs, first-turn legacy/default preservation, native
+Models editing, and profile-write rollback. Successful live model inference was
+verified on 0.1; 0.2 provider probes used nonexistent models and no live keys.
+Re-probe after another harness upgrade.
 
-- **`dsh web` prints exactly one stdout line:** `dsh web: http://127.0.0.1:62375`.
-  With `--port 0` the OS picks and this line is the only way to learn the port.
-  Do not go back to pre-binding a `ServerSocket(0)` - it has a race the harness's
-  bind can lose, and the failure looks like a user error.
-- **`--profile headless "<task>"`** prints the final assistant text on stdout,
+- **`dsh web` prints its bound localhost URL.** On 0.2 it includes a session
+  query: `dsh web: http://127.0.0.1:62375/?token=<session-token>`. Older CLI
+  versions print a bare URL and remain supported. With `--port 0` the OS picks;
+  reading the readiness line avoids a pre-bound `ServerSocket` race. The startup
+  probe uses the authenticated URL and accepts its cookie-setting redirect
+  without following it. The full URL is private navigation data; observable
+  state, MCP output, and UI labels expose the bare port/URL without the token.
+- **`--profile headless "<task>"`** on the original 0.1 probe prints final assistant text on stdout,
   exit 0 for a completed turn and 1 otherwise, diagnostics on stderr. Nothing on
   stderr on success.
 - **No key gives** exit 1 and
@@ -60,8 +67,9 @@ of these after a harness upgrade.
   exists. Getting this wrong yields a green toggle and no tools.
 - **SIGTERM is the harness's ordinary stop:** it drains up to 5s and exits 0.
   SIGINT reports 130.
-- **`$DSH_HOME` defaults to `~/.dsh`**, with `profiles/`, `sessions/`,
-  `settings.yaml`, `.credentials.yaml`.
+- **`$DSH_HOME` defaults to `~/.dsh`**, with `profiles/`, `sessions/`, and
+  `.credentials.yaml`. CLI 0.1 reads `settings.yaml`; CLI 0.2 imports it once
+  into the active profile then archives it. See Settings protocol compatibility.
 - **`.credentials.yaml` is a flat mapping of `NAME: "string"` and nothing else.**
   `dsh-credentials-local`'s `parseCredentialsDocument` rejects, rather than skips,
   a non-mapping root, a key outside `/^[A-Za-z_][A-Za-z0-9_]*$/`, a non-string
@@ -164,8 +172,11 @@ harness owns provider *registration*, BOSS owns the *credential*. Its
 `llm-pi-ai` README is explicit that `apiKeyEnv` is a credential reference and
 "no secret enters this file", so nothing here ever writes a secret to disk.
 
-`DshSecretSync` picks which BOSS secrets to inject. `DshProviderRegistrar` writes
-the matching routes into `$DSH_HOME/settings.yaml`.
+`DshSecretSync` picks which BOSS secrets to inject. `DshProviderRegistrar` uses
+`settings.yaml` for CLI 0.1; CLI 0.2 uses profile-owned `cordis.patch.yml`.
+Resolve credential values once per launch and register only names that are
+actually in that child's environment. Neither writer changes the default vendor
+when adding a provider route.
 
 ### Route names are PROBED, never guessed
 
@@ -174,10 +185,11 @@ request reaches it (`NO_ADAPTER: no adapter registered for provider "x"`). It do
 NOT fail at boot, so a wrong name is a silent misconfiguration that surfaces later
 as a broken harness.
 
-The probe, against `dsh 0.1.0-rc.7`: set one route plus `agent-default-model`
-naming a nonexistent model, run one turn with stdin closed, and read stderr.
-`UNKNOWN_MODEL` means the route resolved and its catalog was consulted; `NO_ADAPTER`
-means pi-ai ships nothing under that key.
+The original probe used `dsh 0.1.0-rc.7`; all entries were re-probed against
+0.2.0-rc.2 using a direct patch plus `agent-default-model` naming a nonexistent
+model. `UNKNOWN_MODEL` means the route resolved and its catalog was consulted.
+Unshipped routes reported `NO_ADAPTER` on 0.1 and `INVALID_CONFIG` on 0.2.
+Close stdin and capture complete stderr; no request needs a live credential.
 
 | Verdict | Routes |
 |---|---|
@@ -211,25 +223,46 @@ between - a wrong API key fails as though the provider rejected you.
 of *on*, "off" is a real state: a single set makes it indistinguishable from
 "never chose", so a key turned off returns at the next launch.
 
-### Writing settings.yaml, and when it refuses
+### Settings protocol compatibility
 
-There is no YAML parser in the host, and pulling one in would round-trip the whole
-document through a serializer that drops comments and reorders keys - worse for a
-config file than a targeted edit. So the registrar only writes when the existing
-`llm-pi-ai` block round-trips exactly: `{ route: { apiKeyEnv: NAME } }` shapes and
-nothing else. A `models` list, `compat`, `retryPolicy`, `baseURL` or
-`modelOverrides` makes it refuse and hand back the YAML to paste. A backup is
-taken before any write.
+The old CLI's settings writer remains for **0.1.x**, including installations
+outside the plugin's npm prefix. It only rewrites simple `apiKeyEnv` dictionaries,
+refuses custom options or comments, and takes a backup. Canonical key spelling
+wins when several injected names resolve to one provider route.
 
-It never touches `agent-default-model`: registering a provider is not switching
-which vendor bills the next turn.
+**0.2.0-rc.2 removed the active global settings layer.** Its legacy importer runs
+after mounting and imports `settings.yaml` into only the first launched profile,
+then renames it to `settings.yaml.imported`. Merely writing a new global settings
+file can therefore affect the second turn rather than the first, and opening web
+first leaves headless without the user's former default vendor. Do not use a
+fake AI turn to force migration.
 
-**Two bugs that only showed up when run against a real file**, both now pinned:
-the route-name regex matched `providers:` itself, so the parsed set never equalled
-the found set and it refused the commonest shape; and several env names mapping to
-one route were deduped with `distinctBy` over a Set, which on a real store picked
-a colleague's `OPEN_AI_API_KEY` over the user's own `OPENAI_API_KEY`. There is now
-a canonical spelling per route.
+`DshProviderRegistrar.registerProfile` initializes the target profile with the
+boot-free `--dump-config` path, then runs the packaged
+`META-INF/boss-plugin/dsh-profile-update.mjs` helper on the resolved Node. The helper
+uses the installed harness's own parser, composition, file-lock, and atomic-write
+libraries. It copies legacy settings into each profile once, preserves an explicit
+user model/vendor selection, and adds only missing provider routes. Existing
+provider endpoints, models, retry settings, comments and `!!js` nodes survive.
+Unrecognized or unsafe document shapes are refused rather than guessed at.
+
+**Provider registration must not use `--patch` config overlays.** The include
+loader replaces the whole targeted row config, and the native config editor then
+rejects Models-page changes because that row is overridden by a CLI layer. The
+helper updates the profile-owned patch, so native controls remain editable. Home
+patch overrides remain authoritative. The BOSS MCP overlay is independent and
+still passed through `--patch`.
+
+The helper writes private backups and migration markers with owner-only access;
+its temporary script is also private and removed after completion. Its output
+contains fixed status, route names, the selected model label, and environment
+variable references only. Never return raw Node exceptions or composed YAML to
+the panel because configuration can contain credentials.
+
+`--inspect` reads current composed profile metadata without updating a profile,
+backup, or migration marker. Refresh uses this for CLI 0.2 so the doctor and key
+panel report current Models-page choices after the global settings file has been
+archived. Returning to CLI 0.1 restores the legacy metadata reader.
 
 ### The BOSS MCP bridge: ports and both launch paths
 
@@ -343,6 +376,8 @@ Both central guards have been shown to fail against a real mutation:
 - dropping `dsh_ask`'s permission fails 2 tests in `DshMcpToolRbacTest`
 - switching the overlay to the bare-id override form fails
   `DshBridgeOverlayTest`
+- removing the modern profile-preservation launch guard fails
+  `DshProfileLaunchGuardTest` before an unverified vendor/default can run
 - reverting `DshNodeResolver` to first-match fails 6 of 10 in
   `DshNodeResolverTest`
 - pointing the Install button back at `setPendingSidebarCommand` fails
