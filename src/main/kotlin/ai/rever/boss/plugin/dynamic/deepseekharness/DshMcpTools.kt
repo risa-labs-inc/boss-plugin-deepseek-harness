@@ -47,7 +47,7 @@ class DshMcpToolProvider(
                 {"type":"object","properties":{
                   "task":{"type":"string","description":"What the harness should do"},
                   "cwd":{"type":"string","description":"Absolute working directory; defaults to the open BOSS project"},
-                  "timeout_seconds":{"type":"integer","description":"Give up after this long (default 600, max 3600)"}
+                  "timeout_seconds":{"type":"integer","description":"Model-turn timeout (default 600, max 3600). Profile preparation is separate: up to 120 seconds for first initialization and 120 seconds for the settings helper."}
                 },"required":["task"]}
             """.trimIndent(),
             readOnly = false,

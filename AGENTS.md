@@ -258,6 +258,12 @@ helper updates the profile-owned patch, so native controls remain editable. Home
 patch overrides remain authoritative. The BOSS MCP overlay is independent and
 still passed through `--patch`.
 
+Each profile backup holds the state immediately before the latest BOSS change,
+so restoring it undoes that change while retaining intervening user edits. It is
+not a permanent original snapshot. The legacy baseline remains available across
+web/headless migration. The model-turn timeout excludes profile preparation;
+the two cold initialization/helper stages are separately bounded at 120 seconds.
+
 The helper writes private backups and migration markers. POSIX owner-only modes
 are enforced; Windows retains the user directory's inherited ACL and applies JDK
 permission flags as best-effort hints. Its temporary script is removed after completion. Its output
