@@ -162,6 +162,20 @@ class DshProfileRegistrarTest {
     }
 
     @Test
+    fun `registration of an initialized profile skips redundant CLI composition`() = runTest {
+        File(home, "profiles/web/package.json").apply { parentFile.mkdirs(); writeText("{}") }
+        val commands = mutableListOf<List<String>>()
+        val registrar = DshProviderRegistrar(env, { node }, { argv, _ ->
+            commands += argv
+            DshExec(0, "UP_TO_DATE", "")
+        }, { "// trusted helper" })
+        assertEquals(DshRegisterOutcome.UpToDate,
+            registrar.registerProfile(dsh, "web", emptySet(), emptyMap()).outcome)
+        assertEquals(1, commands.size)
+        assertEquals(node.absolutePath, commands.single().first())
+    }
+
+    @Test
     fun `explicit resolved Node bypasses PATH lookup for the helper`() = runTest {
         val chosenNode = File(directory, "chosen-node")
         var helperNode: String? = null
@@ -198,6 +212,15 @@ class DshProfileRegistrarTest {
         assertTrue(result.outcome is DshRegisterOutcome.Failed)
         assertTrue(result.outcome.toString().contains(".credentials.yaml"))
         assertFalse(result.toString().contains("secret-value"))
+    }
+
+    @Test
+    fun `refused profile registration explains the patch file and backup remedy`() {
+        val result = DshProviderRegistrar(env).parseProfileOutcome("REFUSED\tunsafe-document")
+        assertTrue(result is DshRegisterOutcome.Failed)
+        assertTrue(result.reason.contains("profile or home cordis.patch.yml"))
+        assertTrue(result.reason.contains("boss-overlays/profile-migrations"))
+        assertFalse(result.reason.contains("Models page"))
     }
 
     @Test

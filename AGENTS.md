@@ -46,6 +46,9 @@ Re-probe after another harness upgrade.
   probe uses the authenticated URL and accepts its cookie-setting redirect
   without following it. The full URL is private navigation data; observable
   state, MCP output, and UI labels expose the bare port/URL without the token.
+  The explicit Copy web URL action intentionally copies the authenticated URL
+  once so the user can open it in their own browser; clipboard tools must not
+  repeatedly copy or log it.
 - **`--profile headless "<task>"`** on the original 0.1 probe prints final assistant text on stdout,
   exit 0 for a completed turn and 1 otherwise, diagnostics on stderr. Nothing on
   stderr on success.
@@ -174,9 +177,11 @@ harness owns provider *registration*, BOSS owns the *credential*. Its
 
 `DshSecretSync` picks which BOSS secrets to inject. `DshProviderRegistrar` uses
 `settings.yaml` for CLI 0.1; CLI 0.2 uses profile-owned `cordis.patch.yml`.
-Resolve credential values once per launch and register only names that are
-actually in that child's environment. Neither writer changes the default vendor
-when adding a provider route.
+The modern path resolves credential values once per launch and registers only
+names actually in that child's environment. The legacy path retains its secret
+selection contract: the dedicated BOSS DeepSeek credential uses the bundled
+adapter and alone does not create a new pi-ai route. Neither writer changes the
+default vendor when adding a provider route.
 
 ### Route names are PROBED, never guessed
 
@@ -265,7 +270,9 @@ backup, or migration marker. Refresh uses this for CLI 0.2 so the doctor and key
 panel report current Models-page choices after the global settings file has been
 archived. Returning to CLI 0.1 restores the legacy metadata reader.
 An initialized profile needs only the inspection helper; it skips the extra CLI
-config-composition process. A missing profile first uses boot-free initialization.
+config-composition process. Panel refresh deliberately initializes a missing
+shipped web profile through the boot-free CLI path before inspection; the helper
+inspection itself creates no profile, backup or migration marker.
 
 The regular PR workflow runs `src/test/resources/dsh-profile-update.test.mjs`
 against the exact pinned CLI on macOS, Linux, and Windows with Node 22.19.0. The
@@ -379,7 +386,7 @@ filter when answering a question about one setting.
 ## Testing
 
 ```bash
-./gradlew build   # 200 JVM tests
+./gradlew build   # 204 JVM tests
 ```
 
 Count results from `build/test-results/test/*.xml`, not from "BUILD SUCCESSFUL" -
@@ -394,6 +401,8 @@ The regression guards have been shown to fail against real mutations:
   `DshProfileLaunchGuardTest` before an unverified vendor/default can run
 - probing the bare web URL instead of the authenticated URL fails
   `DshWebAuthenticationTest`
+- dropping token-value redaction outside the loopback query fails
+  `DshWebServerParseTest`
 - changing Kotlin's `OPENAI_KEY` route to another valid route fails the allowlist
   test in `DshProviderRouteParityTest`
 - returning raw failed config-dump output fails the diagnostic test in

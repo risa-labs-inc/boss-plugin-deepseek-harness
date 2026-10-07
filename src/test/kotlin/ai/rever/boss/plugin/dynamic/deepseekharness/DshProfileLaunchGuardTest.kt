@@ -46,6 +46,7 @@ class DshProfileLaunchGuardTest {
         assertTrue(message.contains("provider settings could not be preserved safely"))
         assertFalse(marker.exists(), "a server started with unverified settings")
         assertTrue(engine.server.state.value is DshServer.Stopped)
+        assertTrue(engine.busy.value == null, "failed preparation must clear the busy indicator")
     }
 
     @Test

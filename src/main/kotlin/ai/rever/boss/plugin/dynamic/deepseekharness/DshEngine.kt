@@ -123,16 +123,21 @@ class DshEngine(
         return syncProfileProviders(ready, "web", childEnv())
     }
 
-    /** Registration and the child receive exactly the same resolved credential names. */
+    /** Modern registration uses the launch environment; the legacy selection contract stays unchanged. */
     private suspend fun syncProfileProviders(
         ready: DshInstall.Ready?,
         profile: String,
         childEnvironment: Map<String, String?>,
     ): DshRegisterOutcome {
-        val names = childEnvironment.filterValues { !it.isNullOrBlank() }.keys
         val result = if (ready != null && registrar.usesProfileSettings(ready.version)) {
+            val names = childEnvironment.filterValues { !it.isNullOrBlank() }.keys
             registrar.registerProfile(ready.dsh, profile, names, childEnvironment, resolvedNode = ready.resolvedNode)
-        } else DshProfileRegistration(registrar.register(registrar.plan(names)))
+        } else {
+            // On 0.1 the dedicated BOSS DeepSeek credential belongs to the
+            // bundled adapter, not a newly generated llm-pi-ai route.
+            val names = secretSync.namesFor(_keySelection.value, credentials.suppliedNames())
+            DshProfileRegistration(registrar.register(registrar.plan(names)))
+        }
         _lastRegister.value = result.outcome
         if (ready != null && registrar.usesProfileSettings(ready.version) && profile == "web") {
             secretSync.setProfileMetadata(result.metadata)
@@ -347,12 +352,13 @@ class DshEngine(
     suspend fun startServer(): String {
         val ready = _install.value as? DshInstall.Ready
             ?: return "DeepSeek Harness is not installed. Open the DeepSeek Harness panel to install it."
-        val environment = childEnv()
-        val registration = syncProfileProviders(ready, "web", environment)
-        registrationFailure(ready.version, registration)?.let { return it }
-        val overlay = bridgeOverlay()
-        _busy.value = "Starting dsh web"
+        _busy.value = "Preparing harness profile"
         return try {
+            val environment = childEnv()
+            val registration = syncProfileProviders(ready, "web", environment)
+            registrationFailure(ready.version, registration)?.let { return it }
+            val overlay = bridgeOverlay()
+            _busy.value = "Starting dsh web"
             when (val outcome = server.start(ready.dsh, workspaceRoot(), environment, overlay)) {
                 is DshServer.Running -> "dsh web is serving ${outcome.url} (pid ${outcome.pid})." + registerNote()
                 is DshServer.Failed -> "dsh web did not start: ${outcome.reason}"

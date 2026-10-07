@@ -82,4 +82,13 @@ class DshWebServerParseTest {
         assertFalse(failure.contains("test-session-token"))
         assertFalse(failure.contains("token="))
     }
+
+    @Test
+    fun `boot failures redact token values outside the loopback query`() {
+        for (diagnostic in listOf(
+            "Error: session token: private-session-value failed",
+            "Error: failed at https://other.example/?token=private-session-value",
+            "Error: failed at http://127.0.0.1:4321/#token=private-session-value",
+        )) assertFalse(DshWebServer.failureText(diagnostic).contains("private-session-value"))
+    }
 }

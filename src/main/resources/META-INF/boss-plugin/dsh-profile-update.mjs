@@ -122,7 +122,8 @@ async function run() {
   };
   const digestOf = text => text === null ? null : createHash('sha256').update(text).digest('hex');
   const homeText = await optionalRead(join(home, 'cordis.patch.yml'));
-  if (homeText !== null) parseAst(homeText, true);
+  // Home patches are read-only. The upstream parser resolves valid aliases;
+  // moving their AST nodes is never necessary, so the rewrite guard does not apply.
   const homePatches = homeText === null ? [] : parseEntries(homeText);
   const migrateRows = (base, currentWithoutHome, userPatches, legacy, active) => {
     // A live old document matches native import's once-only precedence.
@@ -192,7 +193,6 @@ async function run() {
     return withFileLock(join(profileDir, 'package.json'), async () => {
       const path = join(profileDir, 'cordis.patch.yml');
       const original = await optionalRead(path) ?? '[]\n';
-      const document = parseAst(original, true);
       const loaded = loadProfileDirectory('dsh', profileDir, packageJson);
       if (loaded.skippedBundles.length) refuse();
       const markerPath = join(privateDir, `${profile}.json`);
@@ -239,39 +239,45 @@ async function run() {
         if (homePatches.some(patch => patch.id === row.id && Object.hasOwn(patch, 'config'))) refuse();
         changes.push(row);
       }
-      for (const row of changes) {
-        let index = document.contents.items.findLastIndex((item, index) => isMap(item)
-          && document.getIn([index, 'id']) === row.id && !item.has('insert')
-          && (!item.has('name') || document.getIn([index, 'name']) === row.name));
-        if (index < 0) {
-          document.add(document.createNode({ id: row.id, name: row.name }));
-          index = document.contents.items.length - 1;
-        }
-        const previousNode = document.getIn([index, 'config'], true);
-        const nextNode = toNode(document, row.config ?? {});
-        // Keep comments attached to unchanged config nodes, including fields
-        // deep inside models/retry/options. Metadata is copied only when the
-        // node has the same value; replaced values keep their preceding comment.
-        const preserveComments = (before, after) => {
-          if (!before || !after) return;
-          after.commentBefore = before.commentBefore;
-          after.comment = before.comment;
-          if (isMap(before) && isMap(after)) for (const pair of after.items) {
-            const match = before.items.find(old => isDeepStrictEqual(old.key?.toJSON(), pair.key?.toJSON()));
-            if (match) { pair.key = match.key.clone(); preserveComments(match.value, pair.value); }
-          };
-          if (isSeq(before) && isSeq(after)) after.items.forEach((item, i) => preserveComments(before.items[i], item));
-        };
-        preserveComments(previousNode, nextNode);
-        document.setIn([index, 'config'], nextNode);
-      }
-      const next = String(document);
-      const verified = applyEntryPatches(base, parseEntries(next), () => refuse());
-      const effective = applyEntryPatches(verified, homePatches, () => refuse());
-      if (!isDeepStrictEqual(effective, desired)) refuse();
       const profileChanged = changes.length > 0;
       const markerChanged = migrate;
       if (!profileChanged && !markerChanged) return 'UP_TO_DATE' + metadata(desired);
+      let next = original;
+      if (profileChanged) {
+        // Alias-free AST ownership is needed only when rewriting the document.
+        // Already-configured profiles may contain valid aliases without changes.
+        const document = parseAst(original, true);
+        for (const row of changes) {
+          let index = document.contents.items.findLastIndex((item, index) => isMap(item)
+            && document.getIn([index, 'id']) === row.id && !item.has('insert')
+            && (!item.has('name') || document.getIn([index, 'name']) === row.name));
+          if (index < 0) {
+            document.add(document.createNode({ id: row.id, name: row.name }));
+            index = document.contents.items.length - 1;
+          }
+          const previousNode = document.getIn([index, 'config'], true);
+          const nextNode = toNode(document, row.config ?? {});
+          // Keep comments attached to unchanged config nodes, including fields
+          // deep inside models/retry/options. Metadata is copied only when the
+          // node has the same value; replaced values keep their preceding comment.
+          const preserveComments = (before, after) => {
+            if (!before || !after) return;
+            after.commentBefore = before.commentBefore;
+            after.comment = before.comment;
+            if (isMap(before) && isMap(after)) for (const pair of after.items) {
+              const match = before.items.find(old => isDeepStrictEqual(old.key?.toJSON(), pair.key?.toJSON()));
+              if (match) { pair.key = match.key.clone(); preserveComments(match.value, pair.value); }
+            };
+            if (isSeq(before) && isSeq(after)) after.items.forEach((item, i) => preserveComments(before.items[i], item));
+          };
+          preserveComments(previousNode, nextNode);
+          document.setIn([index, 'config'], nextNode);
+        }
+        next = String(document);
+      }
+      const verified = applyEntryPatches(base, parseEntries(next), () => refuse());
+      const effective = applyEntryPatches(verified, homePatches, () => refuse());
+      if (!isDeepStrictEqual(effective, desired)) refuse();
       const backupPath = join(privateDir, `${profile}.cordis.patch.yml.boss-backup`);
       if (profileChanged) await writeFileAtomic(backupPath, original, { mode: 0o600, dirMode: 0o700 });
       try {

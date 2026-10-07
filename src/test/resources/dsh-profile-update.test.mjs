@@ -175,6 +175,47 @@ test('home overrides and aliases are refused without modifying profile bytes', e
   assert.equal(await readFile(patchPath(home), 'utf8'), before);
 }));
 
+test('valid home and profile aliases allow no-op registration without rewriting either document', enabled, async () => fixture(async home => {
+  const homePath = join(home, 'cordis.patch.yml');
+  const aliasedPatch = `- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      google: &provider {apiKeyEnv: GOOGLE_API_KEY}
+      openai: *provider
+`;
+  // A profile alias needs no rewrite when no BOSS routes are being added.
+  await writeFile(patchPath(home), aliasedPatch);
+  const profileBefore = await readFile(patchPath(home), 'utf8');
+  const profileResult = await invoke(home, 'headless', '');
+  assert.match(profileResult.stdout, /^UP_TO_DATE\n/);
+  assert.match(profileResult.stdout, /ENVS\t[^\n]*GOOGLE_API_KEY/);
+  assert.equal(await readFile(patchPath(home), 'utf8'), profileBefore);
+  assert.match((await invoke(home, 'headless', 'OPENAI_API_KEY')).stdout, /^UP_TO_DATE\n/);
+  // A new route would actually rewrite this valid aliased document, so retain
+  // the conservative guard rather than move nodes with shared anchor ownership.
+  assert.match((await invoke(home, 'headless', 'ANTHROPIC_API_KEY')).stdout, /^REFUSED\t/);
+  assert.equal(await readFile(patchPath(home), 'utf8'), profileBefore);
+  // Home aliases are read-only and remain authoritative over the profile.
+  await writeFile(homePath, aliasedPatch);
+  const homeBefore = await readFile(homePath, 'utf8');
+  assert.match((await invoke(home, 'headless', '')).stdout, /^UP_TO_DATE\n/);
+  assert.match((await invoke(home, 'headless', '', true)).stdout, /^UP_TO_DATE\n/);
+  assert.equal(await readFile(patchPath(home), 'utf8'), profileBefore);
+  assert.equal(await readFile(homePath, 'utf8'), homeBefore);
+  // Read-only aliases in another home-owned row do not prevent a safe profile
+  // update; that model choice remains untouched and authoritative.
+  await writeFile(patchPath(home), '[]\n');
+  await writeFile(homePath, `- id: agent-default-model
+  config:
+    provider: &choice deepseek-official
+    model: *choice
+`);
+  const unrelatedHome = await readFile(homePath, 'utf8');
+  assert.match((await invoke(home)).stdout, /^ADDED\topenai\n/);
+  assert.equal(await readFile(homePath, 'utf8'), unrelatedHome);
+}));
+
 test('marker commit failure restores the previous profile and leaves migration retryable', enabled, async () => fixture(async home => {
   await writeFile(join(home, 'settings.yaml'), 'agent-default-model: {provider: openai, model: missing-test-model}\n');
   const before = await readFile(patchPath(home), 'utf8');

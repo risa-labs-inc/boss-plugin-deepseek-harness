@@ -256,6 +256,7 @@ class DshWebServer(
          */
         private val URL_LINE = Regex("""^dsh web:\s+(http://127\.0\.0\.1:\S+)""")
         private val URL_QUERY = Regex("""(http://127\.0\.0\.1:\d+(?:/[^\s?]*)?)\?\S+""")
+        private val TOKEN_VALUE = Regex("""(?i)(\btoken\s*[:=]\s*)[^\s&]+""")
 
         /** Enough of our own argv to tell our server from a recycled pid. */
         private const val STALE_COMMAND_MARKER = "--profile web"
@@ -280,8 +281,10 @@ class DshWebServer(
          * instance, for the same reason [parsePort] is: it reads no state, and
          * what it does to a real transcript is worth pinning.
          */
-        internal fun failureText(transcript: String): String =
-            DshFailure.explain(URL_QUERY.replace(transcript, "$1")).ifBlank { "dsh web exited without output" }
+        internal fun failureText(transcript: String): String {
+            val clean = TOKEN_VALUE.replace(URL_QUERY.replace(transcript, "$1"), "$1[redacted]")
+            return DshFailure.explain(clean).ifBlank { "dsh web exited without output" }
+        }
 
         /** Preserve the authentication query, accepting only an actual loopback readiness URL. */
         internal fun parseUrl(line: String): String? {

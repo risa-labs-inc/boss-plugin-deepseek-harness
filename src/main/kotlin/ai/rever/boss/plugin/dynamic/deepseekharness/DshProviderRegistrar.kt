@@ -38,14 +38,12 @@ internal data class DshProfileRegistration(
 )
 
 /**
- * Registering provider routes in the harness's own `settings.yaml`.
+ * Registering provider routes through the installed harness's settings protocol.
  *
  * ## Why this is written so defensively
  *
- * This edits a file the user owns, with no YAML parser available - the host
- * bundles none, and pulling one in would round-trip the whole document through a
- * serializer that discards comments and reorders keys, which is a worse outcome
- * for a config file than a targeted edit.
+ * CLI 0.1 uses [register] to edit `settings.yaml` conservatively. The host has no
+ * YAML parser, so this path accepts only shapes it can round-trip exactly.
  *
  * So the rule is: **only write when the existing `llm-pi-ai` block can be
  * round-tripped exactly.** Their real file is
@@ -60,20 +58,25 @@ internal data class DshProfileRegistration(
  * did write is unrecoverable. Not timestamped: this runs on every launch, and a
  * directory filling with dated copies of a config file is its own problem.
  *
+ * CLI 0.2 uses [registerProfile] and the installed CLI's YAML AST, composition,
+ * file-lock and atomic-write libraries to update profile-owned `cordis.patch.yml`.
+ * This preserves comments, custom provider options and native Models editing.
+ * Legacy settings migrate once per profile before the first real turn. Unsafe
+ * shapes fail with a file-edit/backup remedy before the engine launches.
+ *
  * ## Route names are verified, never guessed
  *
  * A route name pi-ai does not ship registers **no adapter at all** and fails only
- * when a request reaches it - `NO_ADAPTER: no adapter registered for provider
- * "x"`. It does not fail at boot, so a wrong name is a silent misconfiguration
+ * when a request reaches it (`NO_ADAPTER` on 0.1; `INVALID_CONFIG` on 0.2).
+ * A wrong name is a silent misconfiguration
  * that surfaces later as a broken harness. [ROUTE_FOR_ENV] therefore maps only
  * names probed against a real `dsh` (see AGENTS.md), and an unmapped key is left
  * alone rather than guessed at.
  *
  * ## What it deliberately does not touch
  *
- * `agent-default-model`. Registering a provider is not the same as switching the
- * user's model, and a plugin that silently repointed the default would change
- * which vendor gets billed for the next turn.
+ * Adding a route never repoints `agent-default-model`. The modern path preserves
+ * the user's explicit model/vendor when carrying legacy settings into a profile.
  */
 class DshProviderRegistrar(
     private val env: Map<String, String> = System.getenv(),
@@ -216,11 +219,11 @@ class DshProviderRegistrar(
             val node = resolvedNode ?: nodeResolver()
                 ?: return failure("Node is unavailable for profile configuration")
             val packageRoot = packageRoot(dsh)
-                ?: return failure("the installed harness package could not be located for profile configuration")
+                ?: return failure("the installed harness package could not be located; point PATH at the actual npm-installed dsh executable instead of a wrapper shim, then refresh")
             val source = helperSource() ?: return failure("the profile configuration helper is unavailable")
             val environment = childEnvironment + (DshPaths.HOME_ENV to DshPaths.home(env).absolutePath)
             val initialized = File(DshPaths.profileDir(profile, env), "package.json").isFile
-            if (!inspectOnly || !initialized) {
+            if (!initialized) {
                 // Initialize through the CLI's boot-free path only when needed;
                 // ordinary inspection of an existing profile starts one helper.
                 val probe = runCommand(listOf(dsh.absolutePath, "--profile", profile, "--dump-config"), environment)
@@ -254,7 +257,7 @@ class DshProviderRegistrar(
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (failure: Exception) {
+        } catch (error: Exception) {
             failure("the harness profile could not be updated safely")
         } finally {
             helper?.delete()
@@ -273,7 +276,7 @@ class DshProviderRegistrar(
             }
             // Helper diagnostics are fixed metadata; never pass through raw Node
             // stdout/stderr, which can quote a user's configuration or credential.
-            "REFUSED" -> DshRegisterOutcome.Failed("the profile has overrides that cannot be extended safely; configure routes in the harness Models page")
+            "REFUSED" -> DshRegisterOutcome.Failed("the profile has overrides that cannot be extended safely; edit the profile or home cordis.patch.yml, or restore the profile backup under boss-overlays/profile-migrations before retrying")
             else -> DshRegisterOutcome.Failed("the harness profile could not be updated safely")
         }
     }
@@ -521,7 +524,9 @@ class DshProviderRegistrar(
         )
 
         /**
-         * Routes proved to exist against `dsh 0.1.0-rc.7`, and those proved not to.
+         * Routes proved against `dsh 0.1.0-rc.7` and re-probed on `0.2.0-rc.2`.
+         * Existing routes reach UNKNOWN_MODEL with a nonexistent model; absent
+         * routes report NO_ADAPTER on 0.1 and INVALID_CONFIG on 0.2.
          *
          * Kept as data so a test can assert every value in [ROUTE_FOR_ENV] is one
          * of the verified-present names, and that no known-absent name creeps in.
