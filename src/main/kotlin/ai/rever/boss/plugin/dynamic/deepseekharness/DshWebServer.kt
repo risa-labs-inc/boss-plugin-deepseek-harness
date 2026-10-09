@@ -72,8 +72,10 @@ class DshWebServer(
     internal fun navigationUrl(running: DshServer.Running): String? =
         authenticatedUrl?.takeIf { state.value == running }
 
-    /** Recorded so a later plugin load can reap a server this one left running. */
+    /** New writes use BOSS storage; reads retain the old location as a migration fallback. */
     private val pidFile: File get() = File(DshPaths.overlayDir(env), "web-server.pid")
+    private val pidFiles: List<File> get() = listOf(pidFile, File(DshPaths.legacyOverlayDir(env), "web-server.pid"))
+    internal fun stalePidFile(): File? = pidFiles.firstOrNull { it.isFile }
 
     /**
      * Start the server, or return the running one's state unchanged.
@@ -126,7 +128,7 @@ class DshWebServer(
         process = null
         shutdownHook?.let { hook -> runCatching { Runtime.getRuntime().removeShutdownHook(hook) } }
         shutdownHook = null
-        runCatching { pidFile.delete() }
+        pidFiles.forEach { runCatching { it.delete() } }
         _state.value = DshServer.Stopped
     }
 
@@ -145,7 +147,7 @@ class DshWebServer(
         process = null
         shutdownHook?.let { hook -> runCatching { Runtime.getRuntime().removeShutdownHook(hook) } }
         shutdownHook = null
-        runCatching { pidFile.delete() }
+        pidFiles.forEach { runCatching { it.delete() } }
         _state.value = DshServer.Stopped
     }
 
@@ -227,9 +229,10 @@ class DshWebServer(
 
     /** Reap a server left behind by an earlier load of this plugin. */
     private fun reapStaleLocked() {
-        val recorded = runCatching { pidFile.readText().trim().toLong() }.getOrNull() ?: return
+        val recordedFile = stalePidFile() ?: return
+        val recorded = runCatching { recordedFile.readText().trim().toLong() }.getOrNull() ?: return
         DshProcesses.terminateStale(recorded, STALE_COMMAND_MARKER)
-        runCatching { pidFile.delete() }
+        pidFiles.forEach { runCatching { it.delete() } }
     }
 
     private fun recordPid(pid: Long) = runCatching {

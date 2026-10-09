@@ -18,19 +18,24 @@ import kotlin.test.assertTrue
  */
 class DshToolchainTest {
 
-    private val env = mapOf(DshPaths.HOME_ENV to "/tmp/dsh-home-under-test")
+    private val env = mapOf(
+        DshPaths.HOME_ENV to "/tmp/dsh-home-under-test",
+        DshPaths.BOSS_ROOT_ENV to "/tmp/boss-home-under-test",
+    )
     private fun engine() = DshEngine(FakeServices.context(), env)
 
     // ------------------------------------------------------------------ paths
 
     @Test
-    fun `the prefix sits under the harness home so DSH_HOME moves everything`() {
+    fun `the prefix sits under the boss data root`() {
         assertEquals(
-            File("/tmp/dsh-home-under-test/boss-toolchain"),
+            File("/tmp/boss-home-under-test/plugin-data/ai.rever.boss.plugin.dynamic.deepseekharness/toolchain")
+                .absoluteFile.normalize(),
             DshPaths.toolchainDir(env),
         )
         assertEquals(
-            File("/tmp/dsh-home-under-test/boss-toolchain/bin"),
+            File("/tmp/boss-home-under-test/plugin-data/ai.rever.boss.plugin.dynamic.deepseekharness/toolchain/bin")
+                .absoluteFile.normalize(),
             DshPaths.toolchainBin(env),
         )
     }
@@ -49,13 +54,13 @@ class DshToolchainTest {
             DshPaths.home(env),
         )
         assertFalse(toolchain in harnessOwned)
-        assertTrue(toolchain.name.startsWith("boss-"), "must read as BOSS's, not the harness's")
+        assertTrue(toolchain.toPath().startsWith(File(env.getValue(DshPaths.BOSS_ROOT_ENV)).absoluteFile.normalize().toPath()))
         assertTrue(toolchain != DshPaths.overlayDir(env), "and not the overlay directory either")
     }
 
     @Test
     fun `no installed dsh when the prefix does not exist`() {
-        assertNull(DshPaths.installedDsh(mapOf(DshPaths.HOME_ENV to "/tmp/definitely-not-here-$this")))
+        assertNull(DshPaths.installedDsh(env + (DshPaths.BOSS_ROOT_ENV to "/tmp/definitely-not-here-$this")))
     }
 
     /**
@@ -78,10 +83,16 @@ class DshToolchainTest {
     fun `finds a dsh that is actually on disk`() {
         val home = File.createTempFile("dsh-home", "").let { it.delete(); it }
         try {
-            val bin = File(home, "boss-toolchain/bin").apply { mkdirs() }
+            val bossRoot = File(home, ".boss")
+            val bin = File(bossRoot, "plugin-data/ai.rever.boss.plugin.dynamic.deepseekharness/toolchain/bin").apply { mkdirs() }
             val dsh = File(bin, "dsh").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
 
-            val found = DshPaths.installedDsh(mapOf(DshPaths.HOME_ENV to home.absolutePath))
+            val found = DshPaths.installedDsh(
+                mapOf(
+                    DshPaths.HOME_ENV to home.absolutePath,
+                    DshPaths.BOSS_ROOT_ENV to bossRoot.absolutePath,
+                ),
+            )
 
             assertEquals(dsh.canonicalFile, found?.canonicalFile)
         } finally {

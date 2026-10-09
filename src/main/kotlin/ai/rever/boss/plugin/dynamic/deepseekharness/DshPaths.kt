@@ -1,6 +1,14 @@
 package ai.rever.boss.plugin.dynamic.deepseekharness
 
 import java.io.File
+import java.io.IOException
+import java.nio.file.FileAlreadyExistsException
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
+import java.util.logging.Level
+import java.util.logging.Logger
 
 /**
  * Where DeepSeek Harness keeps its user data.
@@ -19,8 +27,13 @@ import java.io.File
  */
 object DshPaths {
 
+    private val logger = Logger.getLogger(DshPaths::class.java.name)
+
     /** Environment variable the harness honours as its home override. */
     const val HOME_ENV = "DSH_HOME"
+
+    /** Host-provided BOSS root; defaults to ~/.boss on current hosts. */
+    const val BOSS_ROOT_ENV = "BOSS_HOME"
 
     /** Profiles the harness ships templates for and initializes on first use. */
     val SHIPPED_PROFILES = listOf("web", "headless")
@@ -55,7 +68,7 @@ object DshPaths {
      * never be accused of having clobbered `$DSH_HOME/cordis.patch.yml` or a
      * profile's own layer. Those two belong to the user.
      */
-    fun overlayDir(env: Map<String, String> = System.getenv()): File = File(home(env), "boss-overlays")
+    fun overlayDir(env: Map<String, String> = System.getenv()): File = File(bossDataRoot(env), "overlays")
 
     /**
      * The npm prefix this plugin installs the harness into.
@@ -72,11 +85,10 @@ object DshPaths {
      * --prefix <this>` lays out `bin/dsh` and `lib/node_modules`, the tree
      * belongs to one plugin, and removing the directory removes the install.
      *
-     * Under the harness home rather than beside it so `$DSH_HOME` still moves
-     * everything together, and named for BOSS so it cannot be confused with
-     * anything the harness itself writes — same reasoning as [overlayDir].
+     * BOSS owns this install, so it lives under BOSS's durable-data root rather
+     * than the external harness's `$DSH_HOME`.
      */
-    fun toolchainDir(env: Map<String, String> = System.getenv()): File = File(home(env), "boss-toolchain")
+    fun toolchainDir(env: Map<String, String> = System.getenv()): File = File(bossDataRoot(env), "toolchain")
 
     /**
      * `<toolchain>/bin` — where npm links the executable on Unix.
@@ -87,13 +99,26 @@ object DshPaths {
      */
     fun toolchainBin(env: Map<String, String> = System.getenv()): File = File(toolchainDir(env), "bin")
 
+    /** The old BOSS-managed prefix. Kept as a read fallback until migration succeeds. */
+    internal fun legacyToolchainDir(env: Map<String, String> = System.getenv()): File =
+        File(home(env), "boss-toolchain")
+
+    /** The old BOSS-managed overlay directory. Never used for new writes. */
+    internal fun legacyOverlayDir(env: Map<String, String> = System.getenv()): File =
+        File(home(env), "boss-overlays")
+
     /**
      * Every directory the prefix might have put an executable in, most likely
      * first. Both are handed to child processes: getting it wrong on one platform
      * would mean the plugin installs the harness and then cannot find it.
      */
     fun toolchainExecDirs(env: Map<String, String> = System.getenv()): List<File> =
-        listOf(toolchainBin(env), toolchainDir(env))
+        listOf(
+            toolchainBin(env),
+            toolchainDir(env),
+            File(legacyToolchainDir(env), "bin"),
+            legacyToolchainDir(env),
+        ).distinctBy { it.absoluteFile.normalize().path }
 
     /**
      * The `dsh` this plugin installed, or null when it is not there.
@@ -114,6 +139,100 @@ object DshPaths {
      * `dsh plugin --profile <name> add <package>` and will otherwise fail boot.
      */
     fun isShippedProfile(name: String): Boolean = name in SHIPPED_PROFILES
+
+    /** Durable files owned by this BOSS plugin, never by the external harness. */
+    internal fun bossDataRoot(env: Map<String, String> = System.getenv()): File {
+        val configuredRoot = env[BOSS_ROOT_ENV]?.trim().orEmpty()
+        val bossRoot = (if (configuredRoot.isNotEmpty()) File(expandTilde(configuredRoot)) else File(userHome(), ".boss"))
+            .absoluteFile
+            .normalize()
+            .toPath()
+        val pluginRoot = bossRoot.resolve("plugin-data/ai.rever.boss.plugin.dynamic.deepseekharness").normalize()
+        require(pluginRoot.startsWith(bossRoot)) { "DeepSeek plugin data escaped the BOSS root" }
+        return pluginRoot.toFile()
+    }
+
+    /**
+     * Copy plugin-owned legacy directories out of `$DSH_HOME`, then publish the
+     * completed copy with a same-filesystem rename. The source remains as a
+     * rollback and read fallback. Harness-owned profiles, settings, credentials
+     * and sessions remain untouched.
+     *
+     * Every failure is contained here. Migration runs during plugin activation,
+     * so a bad mount, permission error or unsupported link must never prevent the
+     * rest of the plugin from registering.
+     */
+    internal fun migrateLegacyBossData(
+        env: Map<String, String> = System.getenv(),
+        copyTree: (Path, Path) -> Unit = ::copyTree,
+    ) {
+        runCatching {
+            val migrations = listOf(
+                legacyToolchainDir(env).toPath() to toolchainDir(env).toPath(),
+                legacyOverlayDir(env).toPath() to overlayDir(env).toPath(),
+            )
+            migrations.forEach { (legacy, destination) ->
+                migrateOne(legacy, destination, copyTree)
+            }
+        }.onFailure { failure ->
+            logger.log(Level.WARNING, "Could not prepare the DeepSeek data migration; continuing with legacy data", failure)
+        }
+    }
+
+    private fun migrateOne(legacy: Path, destination: Path, copyTree: (Path, Path) -> Unit) {
+        if (!Files.isDirectory(legacy) || Files.isSymbolicLink(legacy) || Files.exists(destination)) return
+        runCatching {
+            Files.createDirectories(destination.parent)
+            val temporary = Files.createTempDirectory(destination.parent, ".${destination.fileName}-import-")
+            try {
+                copyTree(legacy, temporary)
+                // No REPLACE_EXISTING: a concurrent install or overlay write wins.
+                Files.move(temporary, destination)
+            } finally {
+                deleteTree(temporary)
+            }
+        }.onFailure { failure ->
+            if (failure !is FileAlreadyExistsException) {
+                logger.log(Level.WARNING, "Could not import legacy DeepSeek data; continuing with the legacy read fallback", failure)
+            }
+        }
+    }
+
+    private fun copyTree(source: Path, target: Path) {
+        Files.walkFileTree(source, object : SimpleFileVisitor<Path>() {
+            override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): java.nio.file.FileVisitResult {
+                if (dir != source) Files.createDirectory(target.resolve(source.relativize(dir)))
+                return java.nio.file.FileVisitResult.CONTINUE
+            }
+
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): java.nio.file.FileVisitResult {
+                val copied = target.resolve(source.relativize(file))
+                if (attrs.isSymbolicLink) {
+                    Files.copy(file, copied, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                } else {
+                    Files.copy(file, copied, java.nio.file.StandardCopyOption.COPY_ATTRIBUTES)
+                }
+                return java.nio.file.FileVisitResult.CONTINUE
+            }
+        })
+    }
+
+    private fun deleteTree(root: Path) {
+        if (!Files.exists(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return
+        runCatching {
+            Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
+                override fun visitFile(file: Path, attrs: BasicFileAttributes): java.nio.file.FileVisitResult {
+                    Files.deleteIfExists(file)
+                    return java.nio.file.FileVisitResult.CONTINUE
+                }
+
+                override fun postVisitDirectory(dir: Path, exc: IOException?): java.nio.file.FileVisitResult {
+                    Files.deleteIfExists(dir)
+                    return java.nio.file.FileVisitResult.CONTINUE
+                }
+            })
+        }
+    }
 
     private fun userHome(): String = System.getProperty("user.home").orEmpty()
 

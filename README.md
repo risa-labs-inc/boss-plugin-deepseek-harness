@@ -78,7 +78,8 @@ granted to the agents beside it - which is why it is on rather than opt-in, and
 why the panel still says what it grants. One switch turns it off for good.
 
 The bridge is a `--patch` overlay the plugin owns, at
-`$DSH_HOME/boss-overlays/boss-mcp.yml`. Your own `cordis.patch.yml` layers are
+`~/.boss/plugin-data/ai.rever.boss.plugin.dynamic.deepseekharness/overlays/boss-mcp.yml`.
+Your own `cordis.patch.yml` layers are
 never touched. Restart the server to apply a change - bundle and composition
 membership is fixed when a profile starts.
 

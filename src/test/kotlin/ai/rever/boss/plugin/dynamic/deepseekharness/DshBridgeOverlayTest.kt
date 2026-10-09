@@ -24,7 +24,10 @@ class DshBridgeOverlayTest {
         probe
     }
 
-    private val env = mapOf(DshPaths.HOME_ENV to tempHome.absolutePath)
+    private val env = mapOf(
+        DshPaths.HOME_ENV to tempHome.absolutePath,
+        DshPaths.BOSS_ROOT_ENV to File(tempHome, ".boss").absolutePath,
+    )
     private val bridge = DshMcpBridge(env)
 
     @AfterTest

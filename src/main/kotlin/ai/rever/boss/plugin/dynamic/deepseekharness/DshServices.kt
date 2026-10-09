@@ -29,6 +29,10 @@ class DshServices(val context: PluginContext) {
     }
 
     fun start() {
+        // Move only directories this plugin created. The user's external DSH
+        // profiles/settings/sessions are intentionally not BOSS-owned.
+        DshPaths.migrateLegacyBossData()
+
         // The engine resolves this at every harness launch, never here: plugin
         // load order is not guaranteed, so the host's MCP server may not answer
         // yet, and with the bridge on by default that used to mean the toggle read
