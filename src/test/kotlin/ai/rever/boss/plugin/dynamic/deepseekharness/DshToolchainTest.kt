@@ -29,11 +29,13 @@ class DshToolchainTest {
     @Test
     fun `the prefix sits under the boss data root`() {
         assertEquals(
-            File("/tmp/boss-home-under-test/plugin-data/ai.rever.boss.plugin.dynamic.deepseekharness/toolchain").canonicalFile,
+            File("/tmp/boss-home-under-test/plugin-data/ai.rever.boss.plugin.dynamic.deepseekharness/toolchain")
+                .absoluteFile.normalize(),
             DshPaths.toolchainDir(env),
         )
         assertEquals(
-            File("/tmp/boss-home-under-test/plugin-data/ai.rever.boss.plugin.dynamic.deepseekharness/toolchain/bin").canonicalFile,
+            File("/tmp/boss-home-under-test/plugin-data/ai.rever.boss.plugin.dynamic.deepseekharness/toolchain/bin")
+                .absoluteFile.normalize(),
             DshPaths.toolchainBin(env),
         )
     }
@@ -52,7 +54,7 @@ class DshToolchainTest {
             DshPaths.home(env),
         )
         assertFalse(toolchain in harnessOwned)
-        assertTrue(toolchain.toPath().startsWith(File(env.getValue(DshPaths.BOSS_ROOT_ENV)).canonicalFile.toPath()))
+        assertTrue(toolchain.toPath().startsWith(File(env.getValue(DshPaths.BOSS_ROOT_ENV)).absoluteFile.normalize().toPath()))
         assertTrue(toolchain != DshPaths.overlayDir(env), "and not the overlay directory either")
     }
 

@@ -75,8 +75,10 @@ Re-probe after another harness upgrade.
   into the active profile then archives it. See Settings protocol compatibility.
 - BOSS-owned overlays and the managed npm toolchain live beneath
   `~/.boss/plugin-data/ai.rever.boss.plugin.dynamic.deepseekharness/`. Startup
-  moves legacy `$DSH_HOME/boss-{overlays,toolchain}` directories there when a
-  safe filesystem rename is available; harness-owned data is never moved.
+  copies legacy `$DSH_HOME/boss-{overlays,toolchain}` directories through a
+  sibling temporary directory and publishes the complete copy without replacing
+  current data. Legacy data remains as rollback and a read fallback when copying
+  fails; harness-owned data is never moved.
 - **`.credentials.yaml` is a flat mapping of `NAME: "string"` and nothing else.**
   `dsh-credentials-local`'s `parseCredentialsDocument` rejects, rather than skips,
   a non-mapping root, a key outside `/^[A-Za-z_][A-Za-z0-9_]*$/`, a non-string
