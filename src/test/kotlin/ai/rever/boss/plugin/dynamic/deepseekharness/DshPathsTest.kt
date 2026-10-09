@@ -57,7 +57,10 @@ class DshPathsTest {
 
     @Test
     fun `the derived directories hang off the resolved home`() {
-        val env = mapOf(DshPaths.HOME_ENV to "/tmp/custom-dsh")
+        val env = mapOf(
+            DshPaths.HOME_ENV to "/tmp/custom-dsh",
+            DshPaths.BOSS_ROOT_ENV to "/tmp/custom-boss",
+        )
         assertEquals("/tmp/custom-dsh/profiles", DshPaths.profilesDir(env).absolutePath)
         assertEquals("/tmp/custom-dsh/profiles/web", DshPaths.profileDir("web", env).absolutePath)
         assertEquals("/tmp/custom-dsh/sessions", DshPaths.sessionsDir(env).absolutePath)
@@ -65,11 +68,49 @@ class DshPathsTest {
 
     @Test
     fun `the plugin's overlay directory is not one the harness writes`() {
-        val env = mapOf(DshPaths.HOME_ENV to "/tmp/custom-dsh")
+        val env = mapOf(
+            DshPaths.HOME_ENV to "/tmp/custom-dsh",
+            DshPaths.BOSS_ROOT_ENV to "/tmp/custom-boss",
+        )
         val overlays = DshPaths.overlayDir(env).absolutePath
-        assertEquals("/tmp/custom-dsh/boss-overlays", overlays)
+        assertTrue(File(overlays).toPath().startsWith(File("/tmp/custom-boss").canonicalFile.toPath()))
         assertFalse(overlays.endsWith("/profiles"))
         assertFalse(overlays.endsWith("/sessions"))
+    }
+
+    @Test
+    fun `plugin-owned data is contained beneath boss`() {
+        val env = mapOf(DshPaths.BOSS_ROOT_ENV to File(userHome, ".boss").absolutePath)
+        val root = DshPaths.bossDataRoot(env)
+
+        assertTrue(root.toPath().startsWith(File(userHome, ".boss").toPath()))
+        assertTrue(DshPaths.overlayDir(env).toPath().startsWith(root.toPath()))
+        assertTrue(DshPaths.toolchainDir(env).toPath().startsWith(root.toPath()))
+    }
+
+    @Test
+    fun `legacy plugin-owned directories move without touching harness data`() {
+        val oldUserHome = System.getProperty("user.home")
+        val fakeHome = kotlin.io.path.createTempDirectory("dsh-migration-home").toFile()
+        try {
+            System.setProperty("user.home", fakeHome.absolutePath)
+            val harnessHome = File(fakeHome, "external-dsh").apply { mkdirs() }
+            val env = mapOf(
+                DshPaths.HOME_ENV to harnessHome.absolutePath,
+                DshPaths.BOSS_ROOT_ENV to File(fakeHome, ".boss").absolutePath,
+            )
+            File(harnessHome, "boss-toolchain/bin").apply { mkdirs() }
+            File(harnessHome, "boss-toolchain/bin/dsh").writeText("binary")
+            File(harnessHome, "sessions").mkdirs()
+
+            DshPaths.migrateLegacyBossData(env)
+
+            assertTrue(File(DshPaths.toolchainDir(env), "bin/dsh").isFile)
+            assertFalse(File(harnessHome, "boss-toolchain").exists())
+            assertTrue(File(harnessHome, "sessions").isDirectory)
+        } finally {
+            System.setProperty("user.home", oldUserHome)
+        }
     }
 
     @Test

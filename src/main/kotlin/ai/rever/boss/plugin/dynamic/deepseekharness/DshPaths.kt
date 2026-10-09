@@ -1,6 +1,7 @@
 package ai.rever.boss.plugin.dynamic.deepseekharness
 
 import java.io.File
+import java.nio.file.Files
 
 /**
  * Where DeepSeek Harness keeps its user data.
@@ -21,6 +22,9 @@ object DshPaths {
 
     /** Environment variable the harness honours as its home override. */
     const val HOME_ENV = "DSH_HOME"
+
+    /** Host-provided BOSS root; defaults to ~/.boss on current hosts. */
+    const val BOSS_ROOT_ENV = "BOSS_HOME"
 
     /** Profiles the harness ships templates for and initializes on first use. */
     val SHIPPED_PROFILES = listOf("web", "headless")
@@ -55,7 +59,7 @@ object DshPaths {
      * never be accused of having clobbered `$DSH_HOME/cordis.patch.yml` or a
      * profile's own layer. Those two belong to the user.
      */
-    fun overlayDir(env: Map<String, String> = System.getenv()): File = File(home(env), "boss-overlays")
+    fun overlayDir(env: Map<String, String> = System.getenv()): File = File(bossDataRoot(env), "overlays")
 
     /**
      * The npm prefix this plugin installs the harness into.
@@ -72,11 +76,10 @@ object DshPaths {
      * --prefix <this>` lays out `bin/dsh` and `lib/node_modules`, the tree
      * belongs to one plugin, and removing the directory removes the install.
      *
-     * Under the harness home rather than beside it so `$DSH_HOME` still moves
-     * everything together, and named for BOSS so it cannot be confused with
-     * anything the harness itself writes — same reasoning as [overlayDir].
+     * BOSS owns this install, so it lives under BOSS's durable-data root rather
+     * than the external harness's `$DSH_HOME`.
      */
-    fun toolchainDir(env: Map<String, String> = System.getenv()): File = File(home(env), "boss-toolchain")
+    fun toolchainDir(env: Map<String, String> = System.getenv()): File = File(bossDataRoot(env), "toolchain")
 
     /**
      * `<toolchain>/bin` — where npm links the executable on Unix.
@@ -114,6 +117,35 @@ object DshPaths {
      * `dsh plugin --profile <name> add <package>` and will otherwise fail boot.
      */
     fun isShippedProfile(name: String): Boolean = name in SHIPPED_PROFILES
+
+    /** Durable files owned by this BOSS plugin, never by the external harness. */
+    internal fun bossDataRoot(env: Map<String, String> = System.getenv()): File {
+        val configuredRoot = env[BOSS_ROOT_ENV]?.trim().orEmpty()
+        val bossRoot = (if (configuredRoot.isNotEmpty()) File(expandTilde(configuredRoot)) else File(userHome(), ".boss"))
+            .canonicalFile
+        val pluginRoot = File(bossRoot, "plugin-data/ai.rever.boss.plugin.dynamic.deepseekharness").canonicalFile
+        require(pluginRoot.toPath().startsWith(bossRoot.toPath())) { "DeepSeek plugin data escaped the BOSS root" }
+        return pluginRoot
+    }
+
+    /**
+     * Move plugin-owned legacy directories out of `$DSH_HOME` when an atomic
+     * rename is possible. Harness-owned profiles, settings, credentials and
+     * sessions remain untouched.
+     */
+    internal fun migrateLegacyBossData(env: Map<String, String> = System.getenv()) {
+        val migrations = listOf(
+            File(home(env), "boss-toolchain").toPath() to toolchainDir(env).toPath(),
+            File(home(env), "boss-overlays").toPath() to overlayDir(env).toPath(),
+        )
+        migrations.forEach { (legacy, destination) ->
+            if (!Files.isDirectory(legacy) || Files.isSymbolicLink(legacy) || Files.exists(destination)) return@forEach
+            runCatching {
+                Files.createDirectories(destination.parent)
+                Files.move(legacy, destination)
+            }
+        }
+    }
 
     private fun userHome(): String = System.getProperty("user.home").orEmpty()
 

@@ -23,7 +23,10 @@ import kotlin.test.assertTrue
 class DshAwaitInstalledTest {
 
     private val home = File.createTempFile("dsh-await", "").let { it.delete(); it.mkdirs(); it }
-    private val env = mapOf(DshPaths.HOME_ENV to home.absolutePath)
+    private val env = mapOf(
+        DshPaths.HOME_ENV to home.absolutePath,
+        DshPaths.BOSS_ROOT_ENV to File(home, ".boss").absolutePath,
+    )
     private fun engine() = DshEngine(FakeServices.context(), env)
 
     @AfterTest

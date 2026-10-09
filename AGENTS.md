@@ -73,6 +73,10 @@ Re-probe after another harness upgrade.
 - **`$DSH_HOME` defaults to `~/.dsh`**, with `profiles/`, `sessions/`, and
   `.credentials.yaml`. CLI 0.1 reads `settings.yaml`; CLI 0.2 imports it once
   into the active profile then archives it. See Settings protocol compatibility.
+- BOSS-owned overlays and the managed npm toolchain live beneath
+  `~/.boss/plugin-data/ai.rever.boss.plugin.dynamic.deepseekharness/`. Startup
+  moves legacy `$DSH_HOME/boss-{overlays,toolchain}` directories there when a
+  safe filesystem rename is available; harness-owned data is never moved.
 - **`.credentials.yaml` is a flat mapping of `NAME: "string"` and nothing else.**
   `dsh-credentials-local`'s `parseCredentialsDocument` rejects, rather than skips,
   a non-mapping root, a key outside `/^[A-Za-z_][A-Za-z0-9_]*$/`, a non-string
@@ -106,7 +110,7 @@ Re-probe after another harness upgrade.
   floor exists to pre-empt. `DshNode.parse` returns null and the resolver ranks
   unreadable below known-good but above known-too-old.
 - **Never `npm install -g` without `--prefix`.** The harness goes into
-  `DshPaths.toolchainDir` ($DSH_HOME/boss-toolchain), which the plugin owns. A
+  `DshPaths.toolchainDir` beneath the BOSS data root, which the plugin owns. A
   real global install lands in whichever Node's prefix is selected - so it
   vanishes when the user switches Node, may need sudo, and cannot be removed with
   the plugin.
